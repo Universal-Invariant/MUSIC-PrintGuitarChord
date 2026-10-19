@@ -89,15 +89,15 @@ export default function SettingsPanel({ settings, onChange, customs, onCustomsCh
             <option value="vertical">Vertical (classic chord box)</option>
             <option value="horizontal">Horizontal (fretboard)</option>
           </select></label>
-        <label className="row"><span>Fingerings / nut side</span>
+        <label className="row"><span>Nut side</span>
           <select value={s.fingeringsLeft ? 'left' : 'right'} onChange={e => set({ fingeringsLeft: e.target.value === 'left' })}>
-            <option value="left">Nut at top / left</option>
-            <option value="right">Nut at bottom / right</option>
+            <option value="left">Nut at top / left (fingering labels on bottom / right)</option>
+            <option value="right">Nut at bottom / right (fingering labels on top / left)</option>
           </select></label>
-        <label className="row"><span>Board width (px)</span>
-          <input type="range" min={80} max={500} value={s.boardWidth} onChange={e => set({ boardWidth: Number(e.target.value) })} /></label>
+        <label className="row"><span>Fret spacing (px)</span>
+          <input type="range" min={20} max={140} value={s.fretSpacing} onChange={e => set({ fretSpacing: Number(e.target.value) })} disabled={s.spacing !== 'equal'} />{s.spacing === 'equal' && <b style={{ fontSize: 11 }}>{s.fretSpacing}</b>}</label>
         <label className="row"><span>String spacing (px)</span>
-          <input type="range" min={16} max={80} value={s.stringGap} onChange={e => set({ stringGap: Number(e.target.value) })} /></label>
+          <input type="range" min={16} max={80} value={s.stringGap} onChange={e => set({ stringGap: Number(e.target.value) })} /><b style={{ fontSize: 11 }}>{s.stringGap}</b></label>
         <label className="row"><span>String widths</span>
           <select value={s.stringWidthMode} onChange={e => set({ stringWidthMode: e.target.value as Settings['stringWidthMode'] })}>
             <option value="uniform">Same size</option>
@@ -111,21 +111,13 @@ export default function SettingsPanel({ settings, onChange, customs, onCustomsCh
         </>}
       </Section>
 
-      <Section title="Nut & fret spacing">
-        <label className="row check"><input type="checkbox" checked={s.showNut} onChange={e => set({ showNut: e.target.checked })} /><span>Show nut (off ⇒ first line is a fret)</span></label>
+      <Section title="Nut, taper & fret spacing">
+        <label className="row check"><input type="checkbox" checked={s.showNut} onChange={e => set({ showNut: e.target.checked })} /><span>Show nut (off ⇒ first line is a plain fret)</span></label>
         <label className="row"><span>Nut width (px)</span>
-          <input type="range" min={2} max={20} value={s.nutWidth} onChange={e => set({ nutWidth: Number(e.target.value) })} disabled={s.nutTaper === 'custom'} /></label>
-        <label className="row"><span>Nut taper</span>
-          <select value={s.nutTaper} onChange={e => set({ nutTaper: e.target.value as Settings['nutTaper'] })}>
-            <option value="none">None (uniform)</option>
-            <option value="custom">Trapezoid (min/max)</option>
-          </select></label>
-        {s.nutTaper === 'custom' && <>
-          <label className="row"><span>Nut min size</span>
-            <input type="number" min={1} max={30} step={0.5} value={s.nutMin} onChange={e => set({ nutMin: Number(e.target.value) })} /></label>
-          <label className="row"><span>Nut max size</span>
-            <input type="number" min={1} max={30} step={0.5} value={s.nutMax} onChange={e => set({ nutMax: Number(e.target.value) })} /></label>
-        </>}
+          <input type="range" min={2} max={20} value={s.nutWidth} onChange={e => set({ nutWidth: Number(e.target.value) })} disabled={!s.showNut} /><b style={{ fontSize: 11 }}>{s.nutWidth}</b></label>
+        <label className="row"><span>Fretboard taper</span>
+          <input type="range" min={0} max={100} value={Math.round(s.boardTaper * 100)} onChange={e => set({ boardTaper: Number(e.target.value) / 100 })} /><b style={{ fontSize: 11 }}>{Math.round(s.boardTaper * 100)}%</b></label>
+        <div className="mini-note">Taper narrows the fretboard toward the nut. 0% ⇒ the 0-fret end is as wide as the hypothetical 12th fret; higher ⇒ wider trapezoid. It follows real guitar geometry, so it stays consistent when you change the starting fret.</div>
         <label className="row"><span>Fret spacing</span>
           <select value={s.spacing} onChange={e => set({ spacing: e.target.value as Settings['spacing'] })}>
             <option value="equal">Equal</option>
@@ -136,7 +128,8 @@ export default function SettingsPanel({ settings, onChange, customs, onCustomsCh
             <input type="number" min={8} max={200} value={s.firstFretSize} onChange={e => set({ firstFretSize: Number(e.target.value) })} /></label>
           <label className="row"><span>Last fret size (px)</span>
             <input type="number" min={4} max={200} value={s.lastFretSize} onChange={e => set({ lastFretSize: Number(e.target.value) })} /></label>
-        </>}
+          <div className="mini-note">Slot widths shrink geometrically from the first to the last displayed fret.</div>
+        />}
         <label className="row check"><input type="checkbox" checked={s.showDots} onChange={e => set({ showDots: e.target.checked })} /><span>Fret dot markers (3,5,7,9 / double 12)</span></label>
         <ColorPicker label="Inlay color" compact value={s.dotMarkerColor} onChange={c => setColor('dotMarkerColor', c)} />
       </Section>

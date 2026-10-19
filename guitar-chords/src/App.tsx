@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ChordDoc, Dot, Settings } from './lib/types';
 import { uid } from './lib/types';
 import { cellCenter, hitTest, makeDot, renderSvg } from './lib/render';
-import { canvasSize } from './lib/geometry';
+import { canvasSize, fingeringPos } from './lib/geometry';
 import { cycleShapeIndices, cycleColorIndices } from './lib/render';
 import {
   chordFromLibrary, emptyChord, exportRaster, exportSvg, loadChordList, loadCustomShapes,

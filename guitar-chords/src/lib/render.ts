@@ -4,18 +4,17 @@
 import type { ChordColor, ChordDoc, Dot, Settings } from './types';
 import { col, uid } from './types';
 import {
-  DOUBLE_INLAY_FRETS, fretLength, INLAY_FRETS, nutZoneDepth, NUM_STRINGS,
+  boardAcross, boardOrigin, canvasSize, cellCenter, centerAcross, fingeringPos,
+  fretLength, fretPositions, halfWidthAlong, nutFirst, nutZoneDepth, stringLayout,
+  DOUBLE_INLAY_FRETS, INLAY_FRETS, NUM_STRINGS,
 } from './geometry';
-import * as G from './geometry';
-import { shapeInner, STANDARD_SHAPES } from './shapes';
+import { shapeInner } from './shapes';
 
 // re-export geometry helpers for consumers
-export const boardOrigin = G.boardOrigin;
-export const canvasSize = G.canvasSize;
-export const cellCenter = G.cellCenter;
-export const fretPositions = G.fretPositions;
-export const stringLayout = G.stringLayout;
-export const hitTest = G.hitTest;
+export {
+  boardOrigin, canvasSize, cellCenter, fretPositions, stringLayout,
+  fingeringPos, fretLength, nutZoneDepth, hitTest, alongCoord, dotAlongFret,
+} from './geometry';
 
 export const FONT_OPTIONS = [
   'Arial', 'Verdana', 'Georgia', 'Times New Roman', 'Courier New', 'Trebuchet MS',
@@ -65,62 +64,74 @@ export function renderSvg(doc: ChordDoc, settings: Settings, opts: RenderOpts & 
   // background
   parts.push(`<rect x="0" y="0" width="${w}" height="${h}" fill="${col(s.bgFill)}"/>`);
 
-  const { ox, oy } = boardOrigin(s);
-  const positions = fretPositions(s);
-  const flen = fretLength(s);
-  const across = (NUM_STRINGS - 1) * s.stringGap;
   const vertical = s.orientation === 'vertical';
+  const nf = nutFirst(s);                 // true ⇒ nut at top/left
+  const cx = centerAcross(s);             // board center line (canvas coord, across axis)
+  const origin = boardOrigin(s);          // position of the 0-fret line in canvas coords
+  const positions = fretPositions(s);     // ordered nut-side first
+  const flen = fretLength(s);
+  const pad = boardAcross(s) * 0.06;      // board extends slightly past outer strings
 
-  // ----- board background panel -----
-  const bx = vertical ? ox - 14 : ox - nutZoneDepth(s) * 0.15;
-  const by = vertical ? oy - nutZoneDepth(s) * 0.15 : oy - 14;
-  const bw = vertical ? across + 28 : flen + nutZoneDepth(s) * 0.15 + 6;
-  const bh = vertical ? flen + nutZoneDepth(s) * 0.15 + 6 : across + 28;
-  parts.push(`<rect x="${bx.toFixed(1)}" y="${by.toFixed(1)}" width="${bw.toFixed(1)}" height="${bh.toFixed(1)}" rx="6" fill="${col(withA(s.fretColor, 0.06))}"/>`);
+  // Map a "nut-first" along coordinate t (0 at nut line, grows toward higher frets)
+  // and an across-board offset a (relative to the center line) to canvas coords.
+  // The 0-fret line always maps to `origin`; with the nut on the other side the
+  // whole layout is mirrored (higher frets run toward the top/left).
+  const P = (t: number, a: number): { x: number; y: number } => {
+    const along = nf ? t : -t;
+    if (vertical) return { x: cx + a, y: origin.oy + along };
+    return { x: origin.ox + along, y: origin.oy + a };
+  };
 
-  // ----- fret lines -----
+  // ----- fretboard panel (tapered trapezoid) -----
+  parts.push(renderBoardPanel(s, flen, pad, P));
+
+  // ----- fret lines (including the 0-fret line which the nut sits on) -----
   for (let i = 0; i <= s.numFrets; i++) {
-    const p = positions[i];
-    if (vertical) {
-      parts.push(`<line x1="${ox - 14}" y1="${(oy + p).toFixed(1)}" x2="${ox + across + 14}" y2="${(oy + p).toFixed(1)}" stroke="${col(s.fretColor)}" stroke-width="${i === 0 ? 3 : 2.2}" stroke-linecap="round"/>`);
-    } else {
-      parts.push(`<line x1="${(ox + p).toFixed(1)}" y1="${oy - 14}" x2="${(ox + p).toFixed(1)}" y2="${oy + across + 14}" stroke="${col(s.fretColor)}" stroke-width="${i === 0 ? 3 : 2.2}" stroke-linecap="round"/>`);
-    }
+    const t = positions[i];
+    const hw = halfWidthAlong(s, t) + pad * 0.4;
+    const p1 = P(t, -hw), p2 = P(t, hw);
+    const sw = i === 0 ? 2.2 : 2;
+    parts.push(`<line x1="${p1.x.toFixed(1)}" y1="${p1.y.toFixed(1)}" x2="${p2.x.toFixed(1)}" y2="${p2.y.toFixed(1)}" stroke="${col(s.fretColor)}" stroke-width="${sw}" stroke-linecap="round"/>`);
   }
 
-  // ----- nut -----
-  if (s.showNut) parts.push(renderNut(s, ox, oy, across));
+  // ----- nut: thick bar CENTERED on the 0-fret line, spanning the board width there -----
+  if (s.showNut) parts.push(renderNut(s, P, positions[0], halfWidthAlong(s, positions[0])));
 
-  // ----- strings -----
+  // ----- strings (extend from the nut zone through the last fret) -----
   const sl = stringLayout(s);
   for (let i = 0; i < NUM_STRINGS; i++) {
     const off = sl[i].offset;
-    const start = -nutZoneDepth(s) * (s.showNut ? 0.9 : 0.5);
+    const start = -nutZoneDepth(s) * (s.showNut ? 0.75 : 0.4);
     const end = flen + s.baseDotSize * 0.9;
-    if (vertical) {
-      parts.push(`<line x1="${(ox + off).toFixed(1)}" y1="${(oy + start).toFixed(1)}" x2="${(ox + off).toFixed(1)}" y2="${(oy + end).toFixed(1)}" stroke="${col(s.stringColor)}" stroke-width="${sl[i].width.toFixed(2)}"/>`);
-    } else {
-      parts.push(`<line x1="${(ox + start).toFixed(1)}" y1="${(oy + off).toFixed(1)}" x2="${(ox + end).toFixed(1)}" y2="${(oy + off).toFixed(1)}" stroke="${col(s.stringColor)}" stroke-width="${sl[i].width.toFixed(2)}"/>`);
-    }
+    const p1 = P(start, off), p2 = P(end, off);
+    parts.push(`<line x1="${p1.x.toFixed(1)}" y1="${p1.y.toFixed(1)}" x2="${p2.x.toFixed(1)}" y2="${p2.y.toFixed(1)}" stroke="${col(s.stringColor)}" stroke-width="${sl[i].width.toFixed(2)}"/>`);
   }
 
-  // ----- inlay dots -----
-  if (s.showDots) parts.push(renderInlays(s, ox, oy, positions, across, flen, vertical));
+  // ----- inlay dots (center of the board, per real fretboards) -----
+  if (s.showDots) parts.push(renderInlays(s, P, positions));
 
-  // ----- fret numbers -----
+  // ----- fret numbers (on the side away from… kept right/bottom as before) -----
   for (let i = 0; i < s.numFrets; i++) {
     const abs = s.startFret + i;
-    const c = (positions[i] + positions[i + 1]) / 2;
-    const label = `${abs}`;
-    if (vertical) {
-      parts.push(`<text x="${(ox + across + 26).toFixed(1)}" y="${(oy + c).toFixed(1)}" font-family="${esc(s.defaultTextFont)}" font-size="13" fill="${col(withA(s.fretColor, 0.85))}" text-anchor="start" dominant-baseline="middle">${label}</text>`);
-    } else {
-      parts.push(`<text x="${(ox + c).toFixed(1)}" y="${(oy + across + 26).toFixed(1)}" font-family="${esc(s.defaultTextFont)}" font-size="13" fill="${col(withA(s.fretColor, 0.85))}" text-anchor="middle" dominant-baseline="hanging">${label}</text>`);
+    const t = (positions[i] + positions[i + 1]) / 2;
+    const hw = halfWidthAlong(s, t) + pad;
+    const p = P(t, hw + 18);
+    const anchor = vertical ? 'start' : 'middle';
+    const baseline = vertical ? 'middle' : 'hanging';
+    parts.push(`<text x="${p.x.toFixed(1)}" y="${p.y.toFixed(1)}" font-family="${esc(s.defaultTextFont)}" font-size="13" fill="${col(withA(s.fretColor, 0.85))}" text-anchor="${anchor}" dominant-baseline="${baseline}">${abs}</text>`);
+  }
+
+  // ----- string labels near the nut (e B G D A E) -----
+  {
+    const tl = nutZoneDepth(s) * (s.showNut ? 0.45 : 0.4);
+    for (let i = 0; i < NUM_STRINGS; i++) {
+      const p = P(-tl, sl[i].offset);
+      parts.push(`<text x="${p.x.toFixed(1)}" y="${p.y.toFixed(1)}" font-family="${esc(s.defaultTextFont)}" font-size="11" fill="${col(withA(s.fretColor, 0.7))}" text-anchor="middle" dominant-baseline="central">${STRING_LABELS[i]}</text>`);
     }
   }
 
-  // ----- fingerings (beside nut) -----
-  parts.push(renderFingerings(doc, s, ox, oy, vertical));
+  // ----- fingerings: at the END of the fretboard OPPOSITE the nut -----
+  parts.push(renderFingerings(doc, s));
 
   // ----- note dots -----
   for (const d of doc.dots) parts.push(renderDot(d, s, customMap));
@@ -139,84 +150,63 @@ export function renderSvg(doc: ChordDoc, settings: Settings, opts: RenderOpts & 
 
 function withA(c: ChordColor, a: number): ChordColor { return { hex: c.hex, alpha: c.alpha * a }; }
 
-function renderNut(s: Settings, ox: number, oy: number, across: number): string {
-  const vertical = s.orientation === 'vertical';
-  const taper = s.nutTaper === 'custom';
-  let nMin = taper ? s.nutMin : s.nutWidth;
-  let nMax = taper ? s.nutMax : s.nutWidth;
-  if (!s.fingeringsLeft) { const t = nMin; nMin = nMax; nMax = t; }
-  let pts: string;
-  if (vertical) {
-    // nut spans horizontally across strings; thickness varies per side (taper along x)
-    const yTop = oy, half = across / 2;
-    // left side (high e) gets nMin, right side (low E) gets nMax
-    pts = [
-      `${(ox - half).toFixed(1)},${(yTop - nMin / 2).toFixed(1)}`,
-      `${(ox + half).toFixed(1)},${(yTop - nMax / 2).toFixed(1)}`,
-      `${(ox + half).toFixed(1)},${(yTop + nMax / 2).toFixed(1)}`,
-      `${(ox - half).toFixed(1)},${(yTop + nMin / 2).toFixed(1)}`,
-    ].join(' ');
-  } else {
-    const xLeft = ox, half = across / 2;
-    // top (high e) thin, bottom thick when tapering
-    pts = [
-      `${(xLeft - nMin / 2).toFixed(1)},${(oy - half).toFixed(1)}`,
-      `${(xLeft + nMin / 2).toFixed(1)},${(oy - half).toFixed(1)}`,
-      `${(xLeft + nMax / 2).toFixed(1)},${(oy + half).toFixed(1)}`,
-      `${(xLeft - nMax / 2).toFixed(1)},${(oy + half).toFixed(1)}`,
-    ].join(' ');
+/** The wooden fretboard panel: an isosceles trapezoid whose side edges follow the taper. */
+function renderBoardPanel(
+  s: Settings, flen: number, pad: number,
+  P: (t: number, a: number) => { x: number; y: number },
+): string {
+  const steps = 24;
+  const leftPts: string[] = [];
+  const rightPts: string[] = [];
+  const tStart = -(s.showNut ? nutZoneDepth(s) * 0.25 : 4);
+  const tEnd = flen + s.baseDotSize * 0.9;
+  for (let i = 0; i <= steps; i++) {
+    const t = tStart + ((tEnd - tStart) * i) / steps;
+    const hw = halfWidthAlong(s, Math.max(0, t)) + pad;
+    const pl = P(t, -hw), pr = P(t, hw);
+    leftPts.push(`${pl.x.toFixed(1)},${pl.y.toFixed(1)}`);
+    rightPts.push(`${pr.x.toFixed(1)},${pr.y.toFixed(1)}`);
   }
+  const pts = [...leftPts, ...rightPts.reverse()].join(' ');
+  return `<polygon points="${pts}" fill="${col(withA(s.fretColor, 0.08))}" stroke="${col(withA(s.fretColor, 0.25))}" stroke-width="1"/>`;
+}
+
+function renderNut(s: Settings, P: (t: number, a: number) => { x: number; y: number }, t0: number, hw: number): string {
+  // Bar centered on the 0-fret line, thickness = nutWidth along the fret axis,
+  // spanning the full board width at that position (trapezoid ends follow the taper).
+  const th = Math.max(2, s.nutWidth);
+  const a = P(t0 - th / 2, -hw), b = P(t0 - th / 2, hw), c = P(t0 + th / 2, hw), d = P(t0 + th / 2, -hw);
+  const pts = `${a.x.toFixed(1)},${a.y.toFixed(1)} ${b.x.toFixed(1)},${b.y.toFixed(1)} ${c.x.toFixed(1)},${c.y.toFixed(1)} ${d.x.toFixed(1)},${d.y.toFixed(1)}`;
   return `<polygon points="${pts}" fill="#f2ead8" stroke="#c9bfa4" stroke-width="1"/>`;
 }
 
-function renderInlays(s: Settings, ox: number, oy: number, positions: number[], across: number, flen: number, vertical: boolean): string {
+function renderInlays(s: Settings, P: (t: number, a: number) => { x: number; y: number }, positions: number[]): string {
   const out: string[] = [];
   const r = Math.min(7, s.stringGap * 0.16 + 3);
-  const mid = across / 2;
   for (let i = 0; i < s.numFrets; i++) {
     const abs = s.startFret + i;
-    const c = (positions[i] + positions[i + 1]) / 2;
     const isDouble = DOUBLE_INLAY_FRETS.includes(abs);
     const isSingle = INLAY_FRETS.includes(abs);
     if (!isDouble && !isSingle) continue;
-    if (isSingle || isDouble) {
-      if (vertical) {
-        if (isDouble) {
-          out.push(`<circle cx="${ox + mid - r * 2.4}" cy="${oy + c}" r="${r}" fill="${col(s.dotMarkerColor)}"/>`);
-          out.push(`<circle cx="${ox + mid + r * 2.4}" cy="${oy + c}" r="${r}" fill="${col(s.dotMarkerColor)}"/>`);
-        } else {
-          out.push(`<circle cx="${ox + mid}" cy="${oy + c}" r="${r}" fill="${col(s.dotMarkerColor)}"/>`);
-        }
-      } else {
-        if (isDouble) {
-          out.push(`<circle cx="${ox + c}" cy="${oy + mid - r * 2.4}" r="${r}" fill="${col(s.dotMarkerColor)}"/>`);
-          out.push(`<circle cx="${ox + c}" cy="${oy + mid + r * 2.4}" r="${r}" fill="${col(s.dotMarkerColor)}"/>`);
-        } else {
-          out.push(`<circle cx="${ox + c}" cy="${oy + mid}" r="${r}" fill="${col(s.dotMarkerColor)}"/>`);
-        }
-      }
+    const t = (positions[i] + positions[i + 1]) / 2;
+    if (isSingle) {
+      const p = P(t, 0);
+      out.push(`<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="${r}" fill="${col(s.dotMarkerColor)}"/>`);
+    } else {
+      const off = r * 2.4;
+      const p1 = P(t, -off), p2 = P(t, off);
+      out.push(`<circle cx="${p1.x.toFixed(1)}" cy="${p1.y.toFixed(1)}" r="${r}" fill="${col(s.dotMarkerColor)}"/>`);
+      out.push(`<circle cx="${p2.x.toFixed(1)}" cy="${p2.y.toFixed(1)}" r="${r}" fill="${col(s.dotMarkerColor)}"/>`);
     }
   }
-  void flen;
   return out.join('');
 }
 
-function renderFingerings(doc: ChordDoc, s: Settings, ox: number, oy: number, vertical: boolean): string {
+function renderFingerings(doc: ChordDoc, s: Settings): string {
   const out: string[] = [];
-  const sl = stringLayout(s);
-  const nut = nutZoneDepth(s);
   for (const f of doc.fingerings) {
-    const off = sl[f.string]?.offset ?? 0;
-    if (vertical) {
-      const x = ox + off;
-      const y = oy - nut - 10;
-      out.push(`<text x="${x.toFixed(1)}" y="${y.toFixed(1)}" font-family="${esc(f.font)}" font-size="${f.size}" fill="${col(f.color)}" text-anchor="middle" dominant-baseline="auto">${esc(f.text)}</text>`);
-    } else {
-      const left = s.fingeringsLeft;
-      const y = oy + off;
-      const x = left ? ox - nut - 10 : ox + fretLength(s) + nut + 10;
-      out.push(`<text x="${x.toFixed(1)}" y="${y.toFixed(1)}" font-family="${esc(f.font)}" font-size="${f.size}" fill="${col(f.color)}" text-anchor="${left ? 'end' : 'start'}" dominant-baseline="middle">${esc(f.text)}</text>`);
-    }
+    const p = fingeringPos(s, f.string);
+    out.push(`<text x="${p.x.toFixed(1)}" y="${p.y.toFixed(1)}" font-family="${esc(f.font)}" font-size="${f.size}" fill="${col(f.color)}" text-anchor="${p.anchor}" dominant-baseline="middle">${esc(f.text)}</text>`);
   }
   return out.join('');
 }
@@ -267,5 +257,3 @@ export function makeDot(s: Settings, string: number, rel: number): Dot {
     rotation: s.defaultTextRotation,
   };
 }
-
-

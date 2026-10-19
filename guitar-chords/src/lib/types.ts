@@ -67,16 +67,16 @@ export interface Settings {
   numFrets: number;          // number of spaces displayed
   startFret: number;         // absolute fret of first space
   orientation: Orientation;
-  boardWidth: number;        // px (fretboard width across strings)
-  stringGap: number;         // px between strings
+  fretSpacing: number;       // px between frets in 'equal' mode (board length = numFrets × this)
+  stringGap: number;         // px between strings (board width = 5 × this)
   stringWidthMode: 'uniform' | 'progressive';
   minStringWidth: number;
   maxStringWidth: number;
   showNut: boolean;
-  nutWidth: number;
-  nutTaper: 'none' | 'custom';
-  nutMin: number;            // nut thickness at high-E side
-  nutMax: number;            // nut thickness at low-E side
+  nutWidth: number;          // nut bar thickness (px), drawn centered on the 0-fret line
+  boardTaper: number;        // 0..1 — fretboard side taper: 0 ⇒ 0-fret end same width as the
+                             // hypothetical 12th-fret position; higher ⇒ narrower at the nut.
+                             // Independent of startFret so chords feel consistent.
   spacing: SpacingMode;
   firstFretSize: number;     // px (used when logarithmic)
   lastFretSize: number;      // px (used when logarithmic)

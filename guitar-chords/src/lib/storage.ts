@@ -35,16 +35,14 @@ export const DEFAULT_SETTINGS: Settings = {
   numFrets: 5,
   startFret: 1,
   orientation: 'vertical',
-  boardWidth: 200,
+  fretSpacing: 46,
   stringGap: 36,
   stringWidthMode: 'progressive',
   minStringWidth: 1.2,
   maxStringWidth: 3.6,
   showNut: true,
   nutWidth: 7,
-  nutTaper: 'none',
-  nutMin: 5,
-  nutMax: 9,
+  boardTaper: 0.35,
   spacing: 'equal',
   firstFretSize: 52,
   lastFretSize: 30,
@@ -97,7 +95,14 @@ export function loadSettings(): Settings {
   try {
     const raw = localStorage.getItem(LS_SETTINGS);
     if (!raw) return structuredClone(DEFAULT_SETTINGS);
-    return { ...structuredClone(DEFAULT_SETTINGS), ...JSON.parse(raw) };
+    const parsed = JSON.parse(raw) as Partial<Settings> & { boardWidth?: number; nutTaper?: string };
+    // migrate old keys so saved layouts keep sensible sizes
+    if (parsed.boardWidth != null && parsed.fretSpacing == null) {
+      parsed.fretSpacing = Math.round(parsed.boardWidth / Math.max(1, parsed.numFrets ?? DEFAULT_SETTINGS.numFrets));
+    }
+    delete parsed.boardWidth;
+    delete parsed.nutTaper;
+    return { ...structuredClone(DEFAULT_SETTINGS), ...parsed };
   } catch { return structuredClone(DEFAULT_SETTINGS); }
 }
 export function saveSettings(s: Settings) {
