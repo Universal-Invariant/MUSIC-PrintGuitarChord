@@ -67,6 +67,8 @@ export interface Settings {
   numFrets: number;          // number of spaces displayed
   startFret: number;         // absolute fret of first space
   orientation: Orientation;
+  flipAlong: boolean;        // true ⇒ nut at the far end (bottom / right); fret numbers run backwards
+  flipAcross: boolean;       // true ⇒ strings mirrored across the board center line
   fretSpacing: number;       // px between frets in 'equal' mode (board length = numFrets × this)
   stringGap: number;         // px between strings (board width = 5 × this)
   stringWidthMode: 'uniform' | 'progressive';
@@ -101,7 +103,7 @@ export interface Settings {
   defaultTextRotation: number;
 
   // --- misc ---
-  fingeringsLeft: boolean;   // true = nut on left
+  fingeringsLeft: boolean;   // legacy alias of flipAlong (kept for old saved data)
   exportScale: number;
   exportQuality: number;     // 0..1 for jpg/png
 }
@@ -128,9 +130,19 @@ export function fretsFor(settings: Settings): number[] {
   return arr;
 }
 
-/** Relative fret positions 0..numFrets-1 for an absolute fret, or -1 if hidden. */
+/** Relative fret slot 0..numFrets-1 for an absolute fret (-1 = open/nut position). */
 export function relFret(settings: Settings, abs: number): number {
   return abs - settings.startFret;
+}
+
+/** true ⇒ a dot sits in the open/nut zone (rendered as an O marker). */
+export function isOpenRel(rel: number): boolean {
+  return rel < 0 && rel >= -1;
+}
+
+/** true ⇒ the dot falls outside the visible fret range and should not be drawn. */
+export function isHiddenRel(s: Settings, rel: number): boolean {
+  return !isOpenRel(rel) && (rel > s.numFrets - 1 || rel >= fretsFor(s).length);
 }
 
 export function isStandardShape(name: string, s: Settings): boolean {

@@ -1,19 +1,26 @@
 // ---------- SVG renderer: pure functions producing SVG markup ----------
 // Used both for on-screen rendering (dangerouslySetInnerHTML) and for export.
+//
+// Everything is positioned through geometry.project(s, t, a): one logical
+// "nut-first" frame shared with hit-testing, so orientation changes, flips and
+// scaling are equivariant — dots, nut, taper and spacing stay consistent.
 
 import type { ChordColor, ChordDoc, Dot, Settings } from './types';
 import { col, uid } from './types';
+import { isHiddenRel } from './types';
 import {
-  boardAcross, boardOrigin, canvasSize, cellCenter, centerAcross, fingeringPos,
-  fretLength, fretPositions, halfWidthAlong, nutFirst, nutZoneDepth, stringLayout,
+  boardAcross, canvasSize, cellCenter, contentSize, fingeringPos,
+  fretLength, fretPositions, halfWidthAlong, nutZoneDepth,
+  project, stringLabelAlong, stringLayout,
   DOUBLE_INLAY_FRETS, INLAY_FRETS, NUM_STRINGS,
 } from './geometry';
 import { shapeInner } from './shapes';
 
 // re-export geometry helpers for consumers
 export {
-  boardOrigin, canvasSize, cellCenter, fretPositions, stringLayout,
+  canvasSize, cellCenter, contentSize, fretPositions, stringLayout,
   fingeringPos, fretLength, nutZoneDepth, hitTest, alongCoord, dotAlongFret,
+  project, unproject,
 } from './geometry';
 
 export const FONT_OPTIONS = [
@@ -65,22 +72,13 @@ export function renderSvg(doc: ChordDoc, settings: Settings, opts: RenderOpts & 
   parts.push(`<rect x="0" y="0" width="${w}" height="${h}" fill="${col(s.bgFill)}"/>`);
 
   const vertical = s.orientation === 'vertical';
-  const nf = nutFirst(s);                 // true ⇒ nut at top/left
-  const cx = centerAcross(s);             // board center line (canvas coord, across axis)
-  const origin = boardOrigin(s);          // position of the 0-fret line in canvas coords
-  const positions = fretPositions(s);     // ordered nut-side first
+  const positions = fretPositions(s);     // ordered nut-side first (logical frame)
   const flen = fretLength(s);
   const pad = boardAcross(s) * 0.06;      // board extends slightly past outer strings
 
-  // Map a "nut-first" along coordinate t (0 at nut line, grows toward higher frets)
-  // and an across-board offset a (relative to the center line) to canvas coords.
-  // The 0-fret line always maps to `origin`; with the nut on the other side the
-  // whole layout is mirrored (higher frets run toward the top/left).
-  const P = (t: number, a: number): { x: number; y: number } => {
-    const along = nf ? t : -t;
-    if (vertical) return { x: cx + a, y: origin.oy + along };
-    return { x: origin.ox + along, y: origin.oy + a };
-  };
+  // Map logical (t = distance from nut line toward higher frets, a = across offset
+  // from the center line) to canvas pixels — orientation + flips applied uniformly.
+  const P = (t: number, a: number) => project(s, t, a);
 
   // ----- fretboard panel (tapered trapezoid) -----
   parts.push(renderBoardPanel(s, flen, pad, P));
@@ -110,37 +108,44 @@ export function renderSvg(doc: ChordDoc, settings: Settings, opts: RenderOpts & 
   // ----- inlay dots (center of the board, per real fretboards) -----
   if (s.showDots) parts.push(renderInlays(s, P, positions));
 
-  // ----- fret numbers (on the side away from… kept right/bottom as before) -----
+  // ----- fret numbers, just outside the board side -----
   for (let i = 0; i < s.numFrets; i++) {
     const abs = s.startFret + i;
     const t = (positions[i] + positions[i + 1]) / 2;
     const hw = halfWidthAlong(s, t) + pad;
     const p = P(t, hw + 18);
     const anchor = vertical ? 'start' : 'middle';
-    const baseline = vertical ? 'middle' : 'hanging';
+    const baseline = vertical ? 'central' : 'hanging';
     parts.push(`<text x="${p.x.toFixed(1)}" y="${p.y.toFixed(1)}" font-family="${esc(s.defaultTextFont)}" font-size="13" fill="${col(withA(s.fretColor, 0.85))}" text-anchor="${anchor}" dominant-baseline="${baseline}">${abs}</text>`);
   }
 
-  // ----- string labels near the nut (e B G D A E) -----
+  // ----- string labels near the nut (e B G D A E), OUTSIDE the open-dot ring -----
   {
-    const tl = nutZoneDepth(s) * (s.showNut ? 0.45 : 0.4);
+    const tl = stringLabelAlong(s);
     for (let i = 0; i < NUM_STRINGS; i++) {
-      const p = P(-tl, sl[i].offset);
+      const p = P(tl, sl[i].offset);
       parts.push(`<text x="${p.x.toFixed(1)}" y="${p.y.toFixed(1)}" font-family="${esc(s.defaultTextFont)}" font-size="11" fill="${col(withA(s.fretColor, 0.7))}" text-anchor="middle" dominant-baseline="central">${STRING_LABELS[i]}</text>`);
     }
   }
 
+  // ----- O / X markers above the nut for open / muted strings (from chord library) -----
+  parts.push(renderOpenMarkers(doc, s, P));
+
   // ----- fingerings: at the END of the fretboard OPPOSITE the nut -----
   parts.push(renderFingerings(doc, s));
 
-  // ----- note dots -----
-  for (const d of doc.dots) parts.push(renderDot(d, s, customMap));
+  // ----- note dots (skipping any outside the visible fret range) -----
+  for (const d of doc.dots) {
+    const rel = d.fret - s.startFret;
+    if (isHiddenRel(s, rel)) continue;
+    parts.push(renderDot(d, s, customMap));
+  }
 
   // ----- free text boxes -----
   for (const t of doc.texts) {
     const x = t.x * w, y = t.y * h;
     parts.push(`<g transform="translate(${x.toFixed(1)},${y.toFixed(1)}) rotate(${t.rotation})">`);
-    parts.push(`<text font-family="${esc(t.font)}" font-size="${t.size}" fill="${col(t.color)}" text-anchor="${t.anchor}" dominant-baseline="middle">${esc(t.text)}</text>`);
+    parts.push(`<text font-family="${esc(t.font)}" font-size="${t.size}" fill="${col(t.color)}" text-anchor="${t.anchor}" dominant-baseline="central">${esc(t.text)}</text>`);
     parts.push('</g>');
   }
 
@@ -202,11 +207,44 @@ function renderInlays(s: Settings, P: (t: number, a: number) => { x: number; y: 
   return out.join('');
 }
 
+/**
+ * Traditional X/O markers in front of the nut for strings explicitly marked
+ * open ('0') or muted ('x') via their fingering label (as loaded from the
+ * chord library). Drawn on the opposite side of the string-label ring so the
+ * three bands (markers | labels | nut) never collide.
+ */
+function renderOpenMarkers(doc: ChordDoc, s: Settings, P: (t: number, a: number) => { x: number; y: number }): string {
+  const out: string[] = [];
+  const cs = contentSize(s);
+  // place markers midway between the canvas edge margin and the string labels
+  const tMark = Math.min(-nutZoneDepth(s) - 14, -(cs.along - fretLength(s)) * 0.5 - nutZoneDepth(s) * 0.5);
+  const r = Math.min(9, Math.max(5, s.stringGap * 0.22));
+  const color = col(withA(s.fretColor, 0.9));
+  for (const f of doc.fingerings) {
+    const txt = f.text.trim().toLowerCase();
+    const isOpen = txt === '0' || txt === 'o';
+    const isMute = txt === 'x';
+    if (!isOpen && !isMute) continue;
+    const off = stringLayout(s)[f.string]?.offset ?? 0;
+    const p = P(tMark, off);
+    if (isOpen) {
+      out.push(`<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="${r.toFixed(1)}" fill="none" stroke="${color}" stroke-width="1.6"/>`);
+    } else {
+      const k = r * 0.72;
+      out.push(
+        `<line x1="${(p.x - k).toFixed(1)}" y1="${(p.y - k).toFixed(1)}" x2="${(p.x + k).toFixed(1)}" y2="${(p.y + k).toFixed(1)}" stroke="${color}" stroke-width="1.8" stroke-linecap="round"/>` +
+        `<line x1="${(p.x - k).toFixed(1)}" y1="${(p.y + k).toFixed(1)}" x2="${(p.x + k).toFixed(1)}" y2="${(p.y - k).toFixed(1)}" stroke="${color}" stroke-width="1.8" stroke-linecap="round"/>`,
+      );
+    }
+  }
+  return out.join('');
+}
+
 function renderFingerings(doc: ChordDoc, s: Settings): string {
   const out: string[] = [];
   for (const f of doc.fingerings) {
     const p = fingeringPos(s, f.string);
-    out.push(`<text x="${p.x.toFixed(1)}" y="${p.y.toFixed(1)}" font-family="${esc(f.font)}" font-size="${f.size}" fill="${col(f.color)}" text-anchor="${p.anchor}" dominant-baseline="middle">${esc(f.text)}</text>`);
+    out.push(`<text x="${p.x.toFixed(1)}" y="${p.y.toFixed(1)}" font-family="${esc(f.font)}" font-size="${f.size}" fill="${col(f.color)}" text-anchor="${p.anchor}" dominant-baseline="central">${esc(f.text)}</text>`);
   }
   return out.join('');
 }
@@ -218,7 +256,8 @@ export function renderDot(d: Dot, s: Settings, customs: Record<string,string> = 
   const base = s.colors[colorIdx] ?? s.shapeDefaultColor;
   const alpha = d.transparency != null ? Math.max(0.05, Math.min(1, d.transparency)) : base.alpha;
   const fillColor: ChordColor = { hex: base.hex, alpha };
-  const shapeName = activeShapes(s)[((d.shapeIdx % activeShapes(s).length) + activeShapes(s).length) % activeShapes(s).length] ?? 'circle';
+  const shapes = activeShapes(s);
+  const shapeName = shapes[((d.shapeIdx % shapes.length) + shapes.length) % shapes.length] ?? 'circle';
   const glyphScale = (size * s.shapeScale) / 100;
   const rot = d.rotation || 0;
 
@@ -254,6 +293,6 @@ export function makeDot(s: Settings, string: number, rel: number): Dot {
     textColor: null,
     textSize: null,
     transparency: null,
-    rotation: s.defaultTextRotation,
+    rotation: 0, // shape glyphs start upright; defaultTextRotation applies to TEXT items only
   };
 }

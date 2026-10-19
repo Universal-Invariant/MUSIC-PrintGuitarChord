@@ -89,13 +89,13 @@ export default function SettingsPanel({ settings, onChange, customs, onCustomsCh
             <option value="vertical">Vertical (classic chord box)</option>
             <option value="horizontal">Horizontal (fretboard)</option>
           </select></label>
-        <label className="row"><span>Nut side</span>
-          <select value={s.fingeringsLeft ? 'left' : 'right'} onChange={e => set({ fingeringsLeft: e.target.value === 'left' })}>
-            <option value="left">Nut at top / left (fingering labels on bottom / right)</option>
-            <option value="right">Nut at bottom / right (fingering labels on top / left)</option>
+        <label className="row"><span>Flip fretboard (along)</span>
+          <select value={s.flipAlong ? 'far' : 'near'} onChange={e => set({ flipAlong: e.target.value === 'far', fingeringsLeft: e.target.value !== 'far' })}>
+            <option value="near">Nut at top / left (frets grow down / right)</option>
+            <option value="far">Nut at bottom / right (mirrored, frets grow up / left)</option>
           </select></label>
-        <label className="row"><span>Fret spacing (px)</span>
-          <input type="range" min={20} max={140} value={s.fretSpacing} onChange={e => set({ fretSpacing: Number(e.target.value) })} disabled={s.spacing !== 'equal'} />{s.spacing === 'equal' && <b style={{ fontSize: 11 }}>{s.fretSpacing}</b>}</label>
+        <label className="row check"><input type="checkbox" checked={s.flipAcross} onChange={e => set({ flipAcross: e.target.checked })} /><span>Flip strings (across) — mirror bass/treble order</span></label>
+        <div className="mini-note">Both flips mirror the whole drawing (nut, taper, spacing, dots and labels together); the board stays centered in the canvas.</div>
         <label className="row"><span>String spacing (px)</span>
           <input type="range" min={16} max={80} value={s.stringGap} onChange={e => set({ stringGap: Number(e.target.value) })} /><b style={{ fontSize: 11 }}>{s.stringGap}</b></label>
         <label className="row"><span>String widths</span>
@@ -118,7 +118,7 @@ export default function SettingsPanel({ settings, onChange, customs, onCustomsCh
         <label className="row"><span>Fretboard taper</span>
           <input type="range" min={0} max={100} value={Math.round(s.boardTaper * 100)} onChange={e => set({ boardTaper: Number(e.target.value) / 100 })} /><b style={{ fontSize: 11 }}>{Math.round(s.boardTaper * 100)}%</b></label>
         <div className="mini-note">Taper narrows the fretboard toward the nut. 0% ⇒ the 0-fret end is as wide as the hypothetical 12th fret; higher ⇒ wider trapezoid. It follows real guitar geometry, so it stays consistent when you change the starting fret.</div>
-        <label className="row"><span>Fret spacing</span>
+        <label className="row"><span>Fret spacing mode</span>
           <select value={s.spacing} onChange={e => set({ spacing: e.target.value as Settings['spacing'] })}>
             <option value="equal">Equal</option>
             <option value="logarithmic">Logarithmic (real guitar)</option>

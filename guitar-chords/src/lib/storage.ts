@@ -35,6 +35,8 @@ export const DEFAULT_SETTINGS: Settings = {
   numFrets: 5,
   startFret: 1,
   orientation: 'vertical',
+  flipAlong: false,
+  flipAcross: false,
   fretSpacing: 46,
   stringGap: 36,
   stringWidthMode: 'progressive',
@@ -102,7 +104,14 @@ export function loadSettings(): Settings {
     }
     delete parsed.boardWidth;
     delete parsed.nutTaper;
-    return { ...structuredClone(DEFAULT_SETTINGS), ...parsed };
+    // legacy: fingeringsLeft used to mean "nut at top/left"; now flipAlong mirrors it.
+    if (parsed.flipAlong == null && typeof parsed.fingeringsLeft === 'boolean') {
+      parsed.flipAlong = !parsed.fingeringsLeft;
+    }
+    const merged = { ...structuredClone(DEFAULT_SETTINGS), ...parsed };
+    if (typeof merged.flipAlong !== 'boolean') merged.flipAlong = false;
+    if (typeof merged.flipAcross !== 'boolean') merged.flipAcross = false;
+    return merged;
   } catch { return structuredClone(DEFAULT_SETTINGS); }
 }
 export function saveSettings(s: Settings) {
@@ -126,7 +135,7 @@ export function chordFromLibrary(name: string, shape: (number | null)[], fingeri
   const dots = [];
   for (let i = 0; i < 6; i++) {
     const abs = shape[i];
-    if (abs == null) continue;
+    if (abs == null) continue; // muted — shown as an X marker via the fingering label
     const strIdx = 5 - i; // model index 0 = high e
     dots.push({
       id: `lib-${name}-${i}`,
@@ -138,6 +147,8 @@ export function chordFromLibrary(name: string, shape: (number | null)[], fingeri
       font: null, textColor: null, textSize: null, transparency: null, rotation: 0,
     });
   }
+  // Keep ALL fingering labels ('1'..'4', '0' and 'x') — the renderer draws O/X
+  // markers in front of the nut for the '0'/'x' entries.
   const fing = (fingerings ?? []).map((t, i) => ({
     id: `libf-${name}-${i}`,
     string: 5 - i,
@@ -145,7 +156,7 @@ export function chordFromLibrary(name: string, shape: (number | null)[], fingeri
     font: settings.defaultTextFont,
     size: 15,
     color: { hex: '#333333', alpha: 1 } as ChordColor,
-  })).filter(f => f.text !== '0');
+  }));
   return { name, dots, texts: [], fingerings: fing };
 }
 
