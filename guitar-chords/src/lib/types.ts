@@ -62,10 +62,16 @@ export interface Fingering {
 export type SpacingMode = 'equal' | 'logarithmic';
 export type Orientation = 'vertical' | 'horizontal';
 
+/** Canvas padding around the drawing, one value per side. */
+export interface Margins { top: number; right: number; bottom: number; left: number }
+
+/** Which fret numbers are drawn beside the board. */
+export type FretLabelMode = 'all' | 'none' | 'custom';
+
 export interface Settings {
   // --- fretboard geometry ---
   numFrets: number;          // number of spaces displayed
-  startFret: number;         // absolute fret of first space
+  startFret: number;         // absolute fret of first space (0 ⇒ nut is shown)
   orientation: Orientation;
   flipAlong: boolean;        // true ⇒ nut at the far end (bottom / right); fret numbers run backwards
   flipAcross: boolean;       // true ⇒ strings mirrored across the board center line
@@ -74,11 +80,15 @@ export interface Settings {
   stringWidthMode: 'uniform' | 'progressive';
   minStringWidth: number;
   maxStringWidth: number;
-  showNut: boolean;
   nutWidth: number;          // nut bar thickness (px), drawn centered on the 0-fret line
-  boardTaper: number;        // 0..1 — fretboard side taper: 0 ⇒ 0-fret end same width as the
-                             // hypothetical 12th-fret position; higher ⇒ narrower at the nut.
-                             // Independent of startFret so chords feel consistent.
+  boardTaper: number;        // 0..1 — fretboard side taper: 0 ⇒ constant width; higher ⇒
+                             // WIDER toward the nut / lower frets and narrower toward the
+                             // high frets (like a real fretboard fan). Follows ABSOLUTE
+                             // fret positions, so it survives flips and startFret changes.
+  fretLabels: FretLabelMode; // show all / none / a custom set of fret numbers
+  fretLabelList: string;     // comma/range list e.g. "3-5, 8, 12" (used when fretLabels='custom')
+  openSide: 'nut' | 'far';   // which END the string open-pitches (e B G D A E) sit at
+  margins: Margins;          // configurable padding of the board canvas (top/right/bottom/left)
   spacing: SpacingMode;
   firstFretSize: number;     // px (used when logarithmic)
   lastFretSize: number;      // px (used when logarithmic)
@@ -135,14 +145,20 @@ export function relFret(settings: Settings, abs: number): number {
   return abs - settings.startFret;
 }
 
-/** true ⇒ a dot sits in the open/nut zone (rendered as an O marker). */
+/** true ⇒ a dot sits in the floating open-string zone just before the nut. */
 export function isOpenRel(rel: number): boolean {
   return rel < 0 && rel >= -1;
 }
 
 /** true ⇒ the dot falls outside the visible fret range and should not be drawn. */
 export function isHiddenRel(s: Settings, rel: number): boolean {
-  return !isOpenRel(rel) && (rel > s.numFrets - 1 || rel >= fretsFor(s).length);
+  return !isOpenRel(rel) && (rel < 0 || rel > s.numFrets - 1);
+}
+
+/** true ⇒ the nut bar is drawn. The nut exists only when the view starts at fret 0 —
+ *  there is no "0 fret" of its own; fret 0 IS the nut / open strings. */
+export function nutShown(s: Settings): boolean {
+  return s.startFret === 0;
 }
 
 export function isStandardShape(name: string, s: Settings): boolean {

@@ -1,5 +1,6 @@
 import { useState } from 'react';
-import type { ChordColor, Settings } from '../lib/types';
+import type { ChordColor, Margins, Settings } from '../lib/types';
+import { nutShown } from '../lib/types';
 import { BASKET_COLORS, DEFAULT_COLORS, DEFAULT_SETTINGS } from '../lib/storage';
 import { STANDARD_SHAPES, sanitizeSvgInput } from '../lib/shapes';
 import { FONT_OPTIONS } from '../lib/render';
@@ -89,13 +90,25 @@ export default function SettingsPanel({ settings, onChange, customs, onCustomsCh
             <option value="vertical">Vertical (classic chord box)</option>
             <option value="horizontal">Horizontal (fretboard)</option>
           </select></label>
-        <label className="row"><span>Flip fretboard (along)</span>
+        <label className="row"><span>Flip fretboard along (nut side)</span>
           <select value={s.flipAlong ? 'far' : 'near'} onChange={e => set({ flipAlong: e.target.value === 'far', fingeringsLeft: e.target.value !== 'far' })}>
             <option value="near">Nut at top / left (frets grow down / right)</option>
             <option value="far">Nut at bottom / right (mirrored, frets grow up / left)</option>
           </select></label>
-        <label className="row check"><input type="checkbox" checked={s.flipAcross} onChange={e => set({ flipAcross: e.target.checked })} /><span>Flip strings (across) — mirror bass/treble order</span></label>
+        <label className="row check"><input type="checkbox" checked={s.flipAcross} onChange={e => set({ flipAcross: e.target.checked })} /><span>Flip fret numbers across — mirror bass/treble order</span></label>
         <div className="mini-note">Both flips mirror the whole drawing (nut, taper, spacing, dots and labels together); the board stays centered in the canvas.</div>
+        <div className="row"><span>Canvas padding (px)</span></div>
+        <div className="margins-grid">
+          {(['top', 'right', 'bottom', 'left'] as const).map(side => (
+            <label key={side} className="row compact"><span>{side}</span>
+              <input type="number" min={0} max={240} value={s.margins[side]}
+                onChange={e => set({ margins: { ...s.margins, [side]: Math.max(0, Math.min(240, Number(e.target.value) || 0)) } as Margins })} /></label>
+          ))}
+        </div>
+        <button className="btn small" onClick={() => {
+          const v = s.margins.top;
+          set({ margins: { top: v, right: v, bottom: v, left: v } });
+        }}>Apply top value to all sides</button>
         <label className="row"><span>String spacing (px)</span>
           <input type="range" min={16} max={80} value={s.stringGap} onChange={e => set({ stringGap: Number(e.target.value) })} /><b style={{ fontSize: 11 }}>{s.stringGap}</b></label>
         <label className="row"><span>String widths</span>
@@ -112,12 +125,28 @@ export default function SettingsPanel({ settings, onChange, customs, onCustomsCh
       </Section>
 
       <Section title="Nut, taper & fret spacing">
-        <label className="row check"><input type="checkbox" checked={s.showNut} onChange={e => set({ showNut: e.target.checked })} /><span>Show nut (off ⇒ first line is a plain fret)</span></label>
+        <div className="mini-note">The nut shows automatically when the starting fret is 0 (fret 0 <b>is</b> the nut — there is no separate 0-fret). Open-string dots float before the first fret line; strings never extend past the last fret.</div>
         <label className="row"><span>Nut width (px)</span>
-          <input type="range" min={2} max={20} value={s.nutWidth} onChange={e => set({ nutWidth: Number(e.target.value) })} disabled={!s.showNut} /><b style={{ fontSize: 11 }}>{s.nutWidth}</b></label>
+          <input type="range" min={2} max={20} value={s.nutWidth} onChange={e => set({ nutWidth: Number(e.target.value) })} disabled={!nutShown(s)} /><b style={{ fontSize: 11 }}>{s.nutWidth}</b></label>
         <label className="row"><span>Fretboard taper</span>
           <input type="range" min={0} max={100} value={Math.round(s.boardTaper * 100)} onChange={e => set({ boardTaper: Number(e.target.value) / 100 })} /><b style={{ fontSize: 11 }}>{Math.round(s.boardTaper * 100)}%</b></label>
-        <div className="mini-note">Taper narrows the fretboard toward the nut. 0% ⇒ the 0-fret end is as wide as the hypothetical 12th fret; higher ⇒ wider trapezoid. It follows real guitar geometry, so it stays consistent when you change the starting fret.</div>
+        <div className="mini-note">Taper follows real guitar geometry: the board is WIDER toward the nut / low frets and narrows toward the high frets. 0% ⇒ constant width; higher ⇒ wider trapezoid at the nut end. It follows absolute fret positions, so it stays consistent when you change the starting fret or flip the board.</div>
+        <label className="row"><span>Fret numbers</span>
+          <select value={s.fretLabels} onChange={e => set({ fretLabels: e.target.value as Settings['fretLabels'] })}>
+            <option value="all">Show all</option>
+            <option value="none">Hide (none)</option>
+            <option value="custom">Custom range…</option>
+          </select></label>
+        {s.fretLabels === 'custom' && <>
+          <label className="row"><span>Which frets</span>
+            <input className="txt" placeholder="e.g. 3-5, 8, 12  (or: all)" value={s.fretLabelList} onChange={e => set({ fretLabelList: e.target.value })} /></label>
+          <div className="mini-note">Page-style list: single numbers, ranges with “-“, or “all”. Only frets inside the displayed range appear.</div>
+        </>}
+        <label className="row"><span>Open string pitches (e B G D A E)</span>
+          <select value={s.openSide} onChange={e => set({ openSide: e.target.value as Settings['openSide'] })}>
+            <option value="nut">At the nut end</option>
+            <option value="far">At the opposite end</option>
+          </select></label>
         <label className="row"><span>Fret spacing mode</span>
           <select value={s.spacing} onChange={e => set({ spacing: e.target.value as Settings['spacing'] })}>
             <option value="equal">Equal</option>
