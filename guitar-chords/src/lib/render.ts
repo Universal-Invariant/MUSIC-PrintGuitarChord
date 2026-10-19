@@ -7,13 +7,14 @@
 
 import type { ChordColor, ChordDoc, Dot, Settings } from './types';
 import { col, uid } from './types';
-import { isHiddenRel } from './types';
+import { isHiddenRel, nutShown } from './types';
 import {
-  boardAcross, canvasSize, cellCenter, contentSize, fingeringPos,
+  boardAcross, canvasSize, cellCenter, farBand, fingeringPos,
   fretLength, fretPositions, halfWidthAlong, nutZoneDepth,
-  project, stringLabelAlong, stringLayout,
+  project, showFretLabel, stringLabelAlong, stringLayout,
   DOUBLE_INLAY_FRETS, INLAY_FRETS, NUM_STRINGS,
 } from './geometry';
+
 import { shapeInner } from './shapes';
 
 // re-export geometry helpers for consumers
@@ -92,15 +93,17 @@ export function renderSvg(doc: ChordDoc, settings: Settings, opts: RenderOpts & 
     parts.push(`<line x1="${p1.x.toFixed(1)}" y1="${p1.y.toFixed(1)}" x2="${p2.x.toFixed(1)}" y2="${p2.y.toFixed(1)}" stroke="${col(s.fretColor)}" stroke-width="${sw}" stroke-linecap="round"/>`);
   }
 
-  // ----- nut: thick bar CENTERED on the 0-fret line, spanning the board width there -----
-  if (s.showNut) parts.push(renderNut(s, P, positions[0], halfWidthAlong(s, positions[0])));
+  // ----- nut: thick bar on the first fret line — shown ONLY when startFret === 0
+  // (the 0-fret IS the nut; higher starting frets have no nut at all) -----
+  if (nutShown(s)) parts.push(renderNut(s, P, positions[0], halfWidthAlong(s, positions[0])));
 
-  // ----- strings (extend from the nut zone through the last fret) -----
+  // ----- strings (float a little before the first fret line for open notes,
+  //       but STOP exactly at the last fret line — never beyond the fretboard) -----
   const sl = stringLayout(s);
   for (let i = 0; i < NUM_STRINGS; i++) {
     const off = sl[i].offset;
-    const start = -nutZoneDepth(s) * (s.showNut ? 0.75 : 0.4);
-    const end = flen + s.baseDotSize * 0.9;
+    const start = -nutZoneDepth(s) * (nutShown(s) ? 0.75 : 0.4);
+    const end = flen;
     const p1 = P(start, off), p2 = P(end, off);
     parts.push(`<line x1="${p1.x.toFixed(1)}" y1="${p1.y.toFixed(1)}" x2="${p2.x.toFixed(1)}" y2="${p2.y.toFixed(1)}" stroke="${col(s.stringColor)}" stroke-width="${sl[i].width.toFixed(2)}"/>`);
   }
@@ -108,9 +111,10 @@ export function renderSvg(doc: ChordDoc, settings: Settings, opts: RenderOpts & 
   // ----- inlay dots (center of the board, per real fretboards) -----
   if (s.showDots) parts.push(renderInlays(s, P, positions));
 
-  // ----- fret numbers, just outside the board side -----
+  // ----- fret numbers, just outside the board side (all / none / custom list) -----
   for (let i = 0; i < s.numFrets; i++) {
     const abs = s.startFret + i;
+    if (!showFretLabel(s, abs)) continue;
     const t = (positions[i] + positions[i + 1]) / 2;
     const hw = halfWidthAlong(s, t) + pad;
     const p = P(t, hw + 18);
@@ -119,7 +123,7 @@ export function renderSvg(doc: ChordDoc, settings: Settings, opts: RenderOpts & 
     parts.push(`<text x="${p.x.toFixed(1)}" y="${p.y.toFixed(1)}" font-family="${esc(s.defaultTextFont)}" font-size="13" fill="${col(withA(s.fretColor, 0.85))}" text-anchor="${anchor}" dominant-baseline="${baseline}">${abs}</text>`);
   }
 
-  // ----- string labels near the nut (e B G D A E), OUTSIDE the open-dot ring -----
+  // ----- string open-pitches (e B G D A E) — at the nut-side or far-side (settings.openSide) -----
   {
     const tl = stringLabelAlong(s);
     for (let i = 0; i < NUM_STRINGS; i++) {
@@ -128,8 +132,10 @@ export function renderSvg(doc: ChordDoc, settings: Settings, opts: RenderOpts & 
     }
   }
 
-  // ----- O / X markers above the nut for open / muted strings (from chord library) -----
-  parts.push(renderOpenMarkers(doc, s, P));
+  // ----- O / X markers in the floating zone before the first fret line — only when
+  //       the nut is actually shown there (startFret === 0). Higher starting frets
+  //       have no nut: open dots simply float "behind" the board. -----
+  if (nutShown(s)) parts.push(renderOpenMarkers(doc, s, P));
 
   // ----- fingerings: at the END of the fretboard OPPOSITE the nut -----
   parts.push(renderFingerings(doc, s));
@@ -163,8 +169,8 @@ function renderBoardPanel(
   const steps = 24;
   const leftPts: string[] = [];
   const rightPts: string[] = [];
-  const tStart = -(s.showNut ? nutZoneDepth(s) * 0.25 : 4);
-  const tEnd = flen + s.baseDotSize * 0.9;
+  const tStart = nutShown(s) ? -nutZoneDepth(s) * 0.25 : 0;
+  const tEnd = flen; // the board ends at the last fret line — no wood beyond it
   for (let i = 0; i <= steps; i++) {
     const t = tStart + ((tEnd - tStart) * i) / steps;
     const hw = halfWidthAlong(s, Math.max(0, t)) + pad;
@@ -215,9 +221,8 @@ function renderInlays(s: Settings, P: (t: number, a: number) => { x: number; y: 
  */
 function renderOpenMarkers(doc: ChordDoc, s: Settings, P: (t: number, a: number) => { x: number; y: number }): string {
   const out: string[] = [];
-  const cs = contentSize(s);
-  // place markers midway between the canvas edge margin and the string labels
-  const tMark = Math.min(-nutZoneDepth(s) - 14, -(cs.along - fretLength(s)) * 0.5 - nutZoneDepth(s) * 0.5);
+  // just outside the first fret line, in the floating open zone (before the pitch ring)
+  const tMark = -nutZoneDepth(s) * 0.92;
   const r = Math.min(9, Math.max(5, s.stringGap * 0.22));
   const color = col(withA(s.fretColor, 0.9));
   for (const f of doc.fingerings) {

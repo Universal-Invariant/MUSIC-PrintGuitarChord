@@ -42,8 +42,11 @@ export const DEFAULT_SETTINGS: Settings = {
   stringWidthMode: 'progressive',
   minStringWidth: 1.2,
   maxStringWidth: 3.6,
-  showNut: true,
   nutWidth: 7,
+  fretLabels: 'all',
+  fretLabelList: '',
+  openSide: 'nut',
+  margins: { top: 70, right: 70, bottom: 70, left: 70 },
   boardTaper: 0.35,
   spacing: 'equal',
   firstFretSize: 52,
@@ -104,6 +107,7 @@ export function loadSettings(): Settings {
     }
     delete parsed.boardWidth;
     delete parsed.nutTaper;
+    delete (parsed as Record<string, unknown>).showNut; // legacy toggle — nut now follows startFret === 0
     // legacy: fingeringsLeft used to mean "nut at top/left"; now flipAlong mirrors it.
     if (parsed.flipAlong == null && typeof parsed.fingeringsLeft === 'boolean') {
       parsed.flipAlong = !parsed.fingeringsLeft;
@@ -111,6 +115,12 @@ export function loadSettings(): Settings {
     const merged = { ...structuredClone(DEFAULT_SETTINGS), ...parsed };
     if (typeof merged.flipAlong !== 'boolean') merged.flipAlong = false;
     if (typeof merged.flipAcross !== 'boolean') merged.flipAcross = false;
+    if (merged.fretLabels !== 'all' && merged.fretLabels !== 'none' && merged.fretLabels !== 'custom') merged.fretLabels = 'all';
+    if (typeof merged.fretLabelList !== 'string') merged.fretLabelList = '';
+    if (merged.openSide !== 'nut' && merged.openSide !== 'far') merged.openSide = 'nut';
+    const m = (merged.margins ?? {}) as unknown as Record<string, number>;
+    const nz = (v: unknown, d: number) => (typeof v === 'number' && Number.isFinite(v) ? Math.max(0, Math.round(v)) : d);
+    merged.margins = { top: nz(m.top, 70), right: nz(m.right, 70), bottom: nz(m.bottom, 70), left: nz(m.left, 70) };
     return merged;
   } catch { return structuredClone(DEFAULT_SETTINGS); }
 }

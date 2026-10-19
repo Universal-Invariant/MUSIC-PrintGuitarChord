@@ -135,3 +135,7 @@ body { font-family: 'Segoe UI', Arial, sans-serif; background: #eceff3; color: #
   box-shadow: 0 4px 16px rgba(0,0,0,.3); z-index: 200; animation: fadein .2s;
 }
 @keyframes fadein { from { opacity: 0; transform: translate(-50%, 8px); } }
+
+/* margins editor */
+.margins-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 10px; margin: 2px 0 6px; }
+.row.compact > span:first-child { width: 56px; text-transform: capitalize; }
