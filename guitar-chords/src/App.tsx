@@ -174,6 +174,18 @@ export default function App() {
     });
   }, [selectedId, setPage, pushHistory]);
 
+  /** Mutate ANY chord doc by id (history-aware) — used by inline page editing
+   *  where the clicked chord may not be the selected one yet. */
+  const mutateOn = useCallback((id: string, fn: (d: ChordDoc) => ChordDoc) => {
+    pushHistory();
+    setPage(p => {
+      const i = p.chords.findIndex(c => c.id === id);
+      if (i < 0) return p;
+      p.chords[i] = fn(structuredClone(p.chords[i]));
+      return p;
+    });
+  }, [setPage, pushHistory]);
+
   /** Mutate the selected chord's per-chord settings patch (history-aware). */
   const setEff = useCallback((next: Settings) => {
     if (!selectedId) return;
@@ -246,27 +258,80 @@ export default function App() {
   // when pages are CSS-scaled and chords carry translate+scale transforms —
   // including the FIRST chord, whose placement used to be mis-measured because
   // stale width/height values poisoned the naive bounding-rect math.
-  const gRefs = useRef(new Map<string, SVGGElement>());
-  const svgRefs = useRef(new Map<number, SVGSVGElement>());
+  const gRefs = useRef(new Map<string, WeakRef<SVGGElement>>());
+  const svgRefs = useRef(new Map<number, WeakRef<SVGSVGElement>>());
 
-  /** Client px -> local coords inside a chord's <g> (the chord canvas space). */
-  const toChordLocal = (id: string, e: { clientX: number; clientY: number }): { x: number; y: number } | null => {
-    const el = gRefs.current.get(id);
-    if (!el) return null;
-    const ctm = el.getScreenCTM();
-    if (!ctm) return null;
-    const p = new DOMPoint(e.clientX, e.clientY).matrixTransform(ctm.inverse());
-    return { x: p.x, y: p.y };
+  // CRITICAL: all coordinate mapping uses ONE shared matrix — the current
+  // page's <svg> screen CTM — captured FRESH at every pointer event. Mixing
+  // per-element CTMs with page-space placement math produced the "drag jumps
+  // by one chord width" bug whenever chords carried scale transforms or lived
+  // on CSS-shrunk sheets (`.page-svg { max-width:100% }`). Because both the
+  // grab offset and the move deltas go through the same matrix, any stale
+  // CSS scale cancels out exactly, even mid-gesture.
+
+  /** Current page's <svg> element (live, from the WeakRef registry). */
+  const currentPageSvg = (): SVGSVGElement | null => {
+    const w = svgRefs.current.get(pageIdx);
+    const el = w?.deref();
+    if (el) return el;
+    const q = printRef.current?.querySelector(`.page-sheet[data-page-idx="${pageIdx}"] .page-svg`);
+    return q instanceof SVGSVGElement ? q : null;
   };
 
-  /** Client px -> page-space coords of the CURRENT page's SVG. */
-  const toPageCoords = (e: { clientX: number; clientY: number }) => {
-    const svg = svgRefs.current.get(pageIdx) ?? printRef.current?.querySelector('.page-svg');
-    if (!(svg instanceof SVGSVGElement) || !pageView) return { x: 0, y: 0 };
+  /** Client px -> CURRENT page-space coords (via that page svg's screen CTM).
+   *  `piOverride` targets a different page sheet (cross-page drags). */
+  const toPageCoordsAt = (clientX: number, clientY: number, piOverride?: number): { x: number; y: number } => {
+    const pi = piOverride ?? pageIdx;
+    let svg: SVGSVGElement | null = null;
+    if (pi === pageIdx) svg = currentPageSvg();
+    else {
+      const q = printRef.current?.querySelector(`.page-sheet[data-page-idx="${pi}"] .page-svg`);
+      svg = q instanceof SVGSVGElement ? q : null;
+    }
+    if (!svg) return { x: NaN, y: NaN };
     const ctm = svg.getScreenCTM();
-    if (!ctm) return { x: 0, y: 0 };
-    const p = new DOMPoint(e.clientX, e.clientY).matrixTransform(ctm.inverse());
+    if (!ctm) return { x: NaN, y: NaN };
+    const p = new DOMPoint(clientX, clientY).matrixTransform(ctm.inverse());
     return { x: p.x, y: p.y };
+  };
+  const toPageCoords = (e: { clientX: number; clientY: number }) => toPageCoordsAt(e.clientX, e.clientY);
+
+  /** Page index whose sheet contains the given client point (-1 = none). */
+  const pageAtClient = (clientX: number, clientY: number): number => {
+    for (const [pi, w] of svgRefs.current) {
+      const el = w.deref();
+      if (!el) { svgRefs.current.delete(pi); continue; }
+      try {
+        const r = el.getBoundingClientRect();
+        if (clientX >= r.left && clientX <= r.right && clientY >= r.top && clientY <= r.bottom) return pi;
+      } catch { /* detached */ }
+    }
+    return -1;
+  };
+
+  /** Client px -> local coords inside a chord's canvas space, derived purely
+   *  from the SHARED page matrix + that chord's placement (x, y, scale). The
+   *  chord must live on the current page; otherwise returns null. */
+  const toChordLocalById = (id: string, clientX: number, clientY: number): { x: number; y: number } | null => {
+    if (!page) return null;
+    const pl = page.placements[id];
+    if (!pl) return null;
+    const pt = toPageCoords({ clientX, clientY });
+    if (!Number.isFinite(pt.x)) return null;
+    return { x: (pt.x - pl.x) / pl.scale, y: (pt.y - pl.y) / pl.scale };
+  };
+
+  /** Which chord box contains the given client point? Uses each registered
+   *  <g>'s bounding box in SCREEN space — always fresh, never stale. */
+  const chordAtClient = (clientX: number, clientY: number): string | null => {
+    for (const [cid, w] of gRefs.current) {
+      const el = w.deref();
+      if (!el) { gRefs.current.delete(cid); continue; }
+      let r: DOMRect;
+      try { r = el.getBoundingClientRect(); } catch { continue; }
+      if (clientX >= r.left && clientX <= r.right && clientY >= r.top && clientY <= r.bottom) return cid;
+    }
+    return null;
   };
 
   const findDotAt = (string: number, rel: number): Dot | undefined =>
@@ -274,76 +339,81 @@ export default function App() {
 
   // ---------- chord-board interactions (shared by the external editor AND
   //            inline editing on the page). `local` is a point in the chord's
-  //            own canvas coordinate space. ----------
-  const toggleDotAt = (hit: { string: number; rel: number }, e: { shiftKey: boolean; ctrlKey: boolean; metaKey: boolean }) => {
-    if (!entry) return;
-    const existing = findDotAt(hit.string, hit.rel);
-    if (e.shiftKey && existing) {
-      mutate(d => {
+  //            own canvas coordinate space. When `id` is omitted, acts on the
+  //            selected chord (external-editor path). ----------
+  const toggleDotAt = (hit: { string: number; rel: number }, e: { shiftKey: boolean; ctrlKey: boolean; metaKey: boolean }, id?: string) => {
+    const cid = id ?? selectedId;
+    if (!cid || !page) return;
+    const doc = page.chords.find(c => c.id === cid);
+    if (!doc) return;
+    const es = id && id !== selectedId ? mergeChordSettings(settings, doc.settings) : eff;
+    const existing = doc.dots.find(d => d.string === hit.string && d.fret - es.startFret === hit.rel);
+    const cycleColor = cycleColorIndices(es);
+    const cycleShape = cycleShapeIndices(es);
+    mutateOn(cid, d => {
+      if (e.shiftKey && existing) {
         const dot = d.dots.find(dd => dd.id === existing.id)!;
-        const cycle = cycleColorIndices(eff);
-        const pos = cycle.indexOf(dot.colorIdx);
-        dot.colorIdx = cycle[(pos + 1) % cycle.length] ?? 0;
+        const pos = cycleColor.indexOf(dot.colorIdx);
+        dot.colorIdx = cycleColor[(pos + 1) % cycleColor.length] ?? 0;
         return d;
-      });
-      return;
-    }
-    if ((e.ctrlKey || e.metaKey) && existing) {
-      mutate(d => {
+      }
+      if ((e.ctrlKey || e.metaKey) && existing) {
         const dot = d.dots.find(dd => dd.id === existing.id)!;
-        const cycle = cycleShapeIndices(eff);
-        const pos = cycle.indexOf(dot.shapeIdx);
-        dot.shapeIdx = cycle[(pos + 1) % cycle.length] ?? 0;
+        const pos = cycleShape.indexOf(dot.shapeIdx);
+        dot.shapeIdx = cycleShape[(pos + 1) % cycleShape.length] ?? 0;
         return d;
-      });
-      return;
-    }
-    if (existing) {
-      mutate(d => ({ ...d, dots: d.dots.filter(dd => dd.id !== existing.id) }));
-    } else {
-      mutate(d => { d.dots.push(makeDot(eff, hit.string, hit.rel)); return d; });
-    }
+      }
+      if (existing) return { ...d, dots: d.dots.filter(dd => dd.id !== existing.id) };
+      d.dots.push(makeDot(es, hit.string, hit.rel));
+      return d;
+    });
   };
 
   /** One click inside a chord board with an EDITING tool (strict hit-test). */
-  const handleBoardClickLocal = (local: { x: number; y: number }, e: React.MouseEvent): boolean => {
-    if (!entry) return false;
+  const handleBoardClickLocal = (local: { x: number; y: number }, e: React.MouseEvent, id?: string): boolean => {
+    const cid = id ?? selectedId;
+    if (!cid || !page) return false;
+    const doc = page.chords.find(c => c.id === cid);
+    if (!doc) return false;
+    const es = id && id !== selectedId ? mergeChordSettings(settings, doc.settings) : eff;
+    const sz = id && id !== selectedId ? canvasSize(es) : size;
     const { x, y } = local;
-    const hit = hitTest(eff, x, y);
+    const hit = hitTest(es, x, y);
 
-    if (tool === 'dot' && hit) { toggleDotAt(hit, e); return true; }
+    if (tool === 'dot' && hit) { toggleDotAt(hit, e, cid); return true; }
 
     if (tool === 'text') {
-      const t = newText(eff, x / size.w, y / size.h);
-      mutate(d => { d.texts.push(t); return d; });
+      const t = newText(es, x / sz.w, y / sz.h);
+      mutateOn(cid, d => { d.texts.push(t); return d; });
       setSel({ kind: 'text', id: t.id });
       setEditing({ kind: 'text', id: t.id });
       return true;
     }
 
     if (tool === 'fing' && hit) {
-      const existing = entry.fingerings.find(f => f.string === hit.string);
+      const existing = doc.fingerings.find(f => f.string === hit.string);
       if (existing) {
         setSel({ kind: 'fing', id: existing.id });
         setEditing({ kind: 'fing', id: existing.id });
       } else {
-        const f = newFingering(eff, hit.string);
-        mutate(d => { d.fingerings.push(f); return d; });
+        const f = newFingering(es, hit.string);
+        mutateOn(cid, d => { d.fingerings.push(f); return d; });
         setSel({ kind: 'fing', id: f.id });
         setEditing({ kind: 'fing', id: f.id });
       }
       return true;
     }
 
-    setSel(pickItem(x, y));
+    setSel(pickItemAt(cid, x, y));
     return true;
   };
 
   /** Double-click / Alt+click / right-click inside a chord board → edit dialog. */
-  const openEditLocal = (local: { x: number; y: number }) => {
-    if (!entry) return;
+  const openEditLocal = (local: { x: number; y: number }, id?: string) => {
+    const cid = id ?? selectedId;
+    if (!cid) return;
     lastClickRef.current = null;
-    const s = pickItem(local.x, local.y);
+    const s = pickItemAt(cid, local.x, local.y);
     if (s) { setSel(s); setEditing(s); }
   };
 
@@ -526,7 +596,7 @@ export default function App() {
   /** One click inside an on-page chord box while INLINE EDIT is ON. */
   const handleInlineChordClick = (id: string, e: React.MouseEvent) => {
     if (!page || dragging || pageDrag) return;
-    const local = toChordLocal(id, e);
+    const local = toChordLocalById(id, e.clientX, e.clientY);
     if (!local) return;
     const c = page.chords.find(cc => cc.id === id);
     if (!c) return;
@@ -535,7 +605,7 @@ export default function App() {
     const prev = lastClickRef.current;
     if (prev && prev.id === id && now - prev.t < 400 && Math.hypot(e.clientX - prev.x, e.clientY - prev.y) < 8) {
       lastClickRef.current = null;                      // double-click → edit dialog
-      if (id === selectedId) openEditLocal(local);
+      openEditLocal(local, id);                         // works for ANY chord now
       return;
     }
     lastClickRef.current = { x: e.clientX, y: e.clientY, t: now, id };
@@ -560,7 +630,10 @@ export default function App() {
     // other tools / select: act through the shared handlers on the clicked chord
     if (id !== selectedId) selectChord(id);
     if (tool === 'select') { beginTextDrag(id, local); return; }
-    if (id === selectedId) handleBoardClickLocal(local, e);
+    // editing tools (text/fing/select-pick): operate directly on the CLICKED
+    // chord — no stale-render dependency, so it works even when the click
+    // also just changed the selection.
+    handleBoardClickLocal(local, e, id);
   };
 
   // ---------- page-level interactions (select / move chords) ----------
@@ -613,10 +686,10 @@ export default function App() {
     e.stopPropagation();
     if (e.button !== 0) return;               // left button only
     if (inlineEdit && tool !== 'select') {    // inline edit: interior clicks EDIT, border clicks MOVE
-      handleInlineChordClick(id, e);
       const tgt = e.target as Element | null;
       const onFrame = !!tgt?.closest('.chord-frame');
-      if (onFrame) { startChordMove(id, e); return; }   // Alt+border still repositions
+      if (onFrame) { startChordMove(id, e); return; }   // frame/border → reposition
+      handleInlineChordClick(id, e);                    // interior → add dots/text/etc.
       return;
     }
     selectChord(id);
@@ -635,29 +708,64 @@ export default function App() {
     const nat = canvasSize(es);
     let pl = page.placements[id];
     if (!pl) {
-      pl = { x: Math.round(x), y: Math.round(y), w: Math.round(nat.w), h: Math.round(nat.h), scale: 1 };
+      pl = { x: Math.round(x - nat.w / 2), y: Math.round(y - nat.h / 2), w: Math.round(nat.w), h: Math.round(nat.h), scale: 1 };
       setPageNoHist(p => { p.placements[id] = pl!; return p; });
     }
-    // grab offset INSIDE the (scaled) box so the chord doesn't jump on first move
-    pageDragRef.current = { id, sx: x - pl.x, sy: y - pl.y, ox: pl.x, oy: pl.y };
+    // Remember the pointer's page-space anchor and the placement at grab time.
+    // Movement is applied as a DELTA through the same shared matrix, so even
+    // if the CSS scale changes mid-drag it stays consistent (no jumping).
+    pageDragRef.current = { id, sx: x, sy: y, ox: pl.x, oy: pl.y };
     beginDragHistory();                        // ONE snapshot per drag gesture
     setPageDrag(true);
   };
   const onChordBoxMove = (e: React.MouseEvent) => {
     // inline-edit: dragging a TEXT BOX inside a chord moves the text, not the box
     if (dragging && dragRef.current && sel) {
-      // find which chord <g> we are over via the registered refs
-      for (const [cid, el] of gRefs.current) {
-        if (el.contains(e.target as Node)) {
-          const local = toChordLocal(cid, e);
-          if (local) applyTextDrag(local);
-          return;
-        }
-      }
+      const cid = chordAtClient(e.clientX, e.clientY) ?? dragRef.current.id;
+      const local = toChordLocalById(cid, e.clientX, e.clientY);
+      if (local) applyTextDrag(local);
       return;
     }
     const ref = pageDragRef.current;
     if (!ref || !pageDrag || !page) return;
+    // Cross-page drag: dropping onto ANOTHER visible sheet moves the chord
+    // there (Alt held, or pointer inside a different page's bounds).
+    const targetPi = e.altKey ? pageAtClient(e.clientX, e.clientY) : pageIdx;
+    if (targetPi >= 0 && targetPi !== pageIdx && pages[targetPi]) {
+      const pt = toPageCoordsAt(e.clientX, e.clientY, targetPi);
+      if (!Number.isFinite(pt.x)) return;
+      const cfgT = pages[targetPi].config;
+      const psT = pageSizePx(cfgT);
+      const c = page.chords.find(cc => cc.id === ref.id);
+      if (!c) return;
+      const es = mergeChordSettings(settings, c.settings);
+      const nat = canvasSize(es);
+      const cur = page.placements[ref.id];
+      const scale = cur?.scale ?? 1;
+      let nx = snapVal(pt.x - (ref.sx - ref.ox), cfgT);
+      let ny = snapVal(pt.y - (ref.sy - ref.oy), cfgT);
+      nx = Math.max(0, Math.min(Math.max(0, psT.w - nat.w * scale), nx));
+      ny = Math.max(0, Math.min(Math.max(0, psT.h - nat.h * scale), ny));
+      setPageNoHist(p => {
+        const src = p.pages[pageIdx];
+        const dst = p.pages[targetPi];
+        if (!src || !dst) return p;
+        const i = src.chords.findIndex(cc => cc.id === ref.id);
+        if (i < 0) return p;
+        const pl = src.placements[ref.id] ?? { x: nx, y: ny, w: nat.w, h: nat.h, scale };
+        const [doc] = src.chords.splice(i, 1);
+        delete src.placements[ref.id];
+        dst.chords.push(doc);
+        dst.placements[doc.id] = { ...pl, x: nx, y: ny, w: Math.round(nat.w), h: Math.round(nat.h) };
+        if (src.selected === doc.id) src.selected = src.chords[0]?.id ?? null;
+        dst.selected = doc.id;
+        return p;
+      });
+      setPageIdx(targetPi);
+      // re-anchor the gesture on the new page so movement continues smoothly
+      pageDragRef.current = { id: ref.id, sx: pt.x, sy: pt.y, ox: nx, oy: ny };
+      return;
+    }
     const { x, y } = toPageCoords(e);
     const cfg = page.config;
     const ps = pageSizePx(cfg);
