@@ -8,7 +8,7 @@
 import type { ChordColor, ChordDoc, Dot, Settings } from './types';
 import { col, uid } from './types';
 import { isHiddenRel, nutShown } from './types';
-import { pitchAtRel } from './music';
+import { pitchAtRel, midiToName, TUNING_HIGH_TO_LOW } from './music';
 import {
   boardAcross, canvasSize, cellCenter, farBand, fingeringPos,
   fretLength, fretPositions, halfWidthAlong, nutZoneDepth,
@@ -59,7 +59,7 @@ export function stringLabel(i: number): string { return STRING_LABELS[i] ?? ''; 
 
 // ---------------- main render ----------------
 
-export interface RenderOpts { scale?: number }
+export interface RenderOpts { scale?: number; groupId?: string }
 
 export function renderSvg(doc: ChordDoc, settings: Settings, opts: RenderOpts & { customs?: Record<string,string> } = {}): string {
   const s = settings;
@@ -68,8 +68,10 @@ export function renderSvg(doc: ChordDoc, settings: Settings, opts: RenderOpts & 
   const sc = opts.scale ?? 1;
   const parts: string[] = [];
 
+  const gid = opts.groupId ? ` id="${esc(opts.groupId)}"` : '';
   parts.push(`<svg xmlns="http://www.w3.org/2000/svg" width="${Math.round(w * sc)}" height="${Math.round(h * sc)}" viewBox="0 0 ${w} ${h}" data-w="${w}" data-h="${h}">`);
   parts.push('<style>text{user-select:none}</style>');
+  if (opts.groupId) parts.push(`<g${gid}>`);
   // background
   parts.push(`<rect x="0" y="0" width="${w}" height="${h}" fill="${col(s.bgFill)}"/>`);
 
@@ -87,10 +89,13 @@ export function renderSvg(doc: ChordDoc, settings: Settings, opts: RenderOpts & 
 
   // ----- fret lines (including the 0-fret line which the nut sits on) -----
   // stroke width = user "fret thickness" setting (thin vintage vs jumbo frets)
+  // Length: frets span the FULL board width — from one taper edge to the other.
+  // `fretSpan` (settings.fretWidthPct, default 100%) lets the user dial it back.
   const fretW = Math.max(0.5, s.fretThickness ?? 2);
+  const spanK = Math.max(0.5, Math.min(1.5, (s.fretWidthPct ?? 100) / 100));
   for (let i = 0; i <= s.numFrets; i++) {
     const t = positions[i];
-    const hw = halfWidthAlong(s, t) + pad * 0.4;
+    const hw = (halfWidthAlong(s, t) + pad * 0.4) * spanK;
     const p1 = P(t, -hw), p2 = P(t, hw);
     parts.push(`<line x1="${p1.x.toFixed(1)}" y1="${p1.y.toFixed(1)}" x2="${p2.x.toFixed(1)}" y2="${p2.y.toFixed(1)}" stroke="${col(s.fretColor)}" stroke-width="${fretW.toFixed(2)}" stroke-linecap="round"/>`);
   }
@@ -126,12 +131,16 @@ export function renderSvg(doc: ChordDoc, settings: Settings, opts: RenderOpts & 
     parts.push(`<text x="${p.x.toFixed(1)}" y="${p.y.toFixed(1)}" font-family="${esc(s.defaultTextFont)}" font-size="13" fill="${col(withA(s.fretColor, 0.85))}" text-anchor="${anchor}" dominant-baseline="${baseline}">${abs}</text>`);
   }
 
-  // ----- string open-pitches (e B G D A E) — at the nut-side or far-side (settings.openSide) -----
-  {
+  // ----- string open-pitches ring: shows the actual pitch NAMES computed from
+  //       settings.tuning (changing a tuning preset updates them live), can be
+  //       disabled via openNoteLabels, and is pushed away from the board by
+  //       openNoteOffset so it never overlaps the open (rel -1) note dots. -----
+  if (s.openNoteLabels !== false) {
     const tl = stringLabelAlong(s);
     for (let i = 0; i < NUM_STRINGS; i++) {
       const p = P(tl, sl[i].offset);
-      parts.push(`<text x="${p.x.toFixed(1)}" y="${p.y.toFixed(1)}" font-family="${esc(s.defaultTextFont)}" font-size="11" fill="${col(withA(s.fretColor, 0.7))}" text-anchor="middle" dominant-baseline="central">${STRING_LABELS[i]}</text>`);
+      const name = midiToName(s.tuning?.[i] ?? TUNING_HIGH_TO_LOW[i], !!s.preferFlats);
+      parts.push(`<text x="${p.x.toFixed(1)}" y="${p.y.toFixed(1)}" font-family="${esc(s.defaultTextFont)}" font-size="11" fill="${col(withA(s.fretColor, 0.7))}" text-anchor="middle" dominant-baseline="central">${esc(name)}</text>`);
     }
   }
 
@@ -158,6 +167,7 @@ export function renderSvg(doc: ChordDoc, settings: Settings, opts: RenderOpts & 
     parts.push('</g>');
   }
 
+  if (opts.groupId) parts.push('</g>');
   parts.push('</svg>');
   return parts.join('\n');
 }
@@ -275,7 +285,7 @@ export function renderDot(d: Dot, s: Settings, customs: Record<string,string> = 
   // uses startFret). A manually typed text always wins over the auto pitch.
   const label = d.text.trim()
     ? d.text
-    : (s.noteVisible ? pitchAtRel(s.tuning, d.string, rel, !!s.preferFlats) : '');
+    : (s.noteVisible ? pitchAtRel(s.tuning, d.string, rel, !!s.preferFlats, s.startFret) : '');
 
   const out: string[] = [];
   out.push(`<g transform="translate(${c.x.toFixed(1)},${c.y.toFixed(1)}) rotate(${rot})">`);
@@ -293,6 +303,50 @@ export function renderDot(d: Dot, s: Settings, customs: Record<string,string> = 
 
 function relOf(s: Settings, absFret: number): number {
   return absFret - s.startFret;
+}
+
+// ---------------- page composer (multi-chord layout) ----------------
+
+/** Extract the inner markup of a chord SVG produced by renderSvg (drops the <svg> wrapper). */
+export function svgInner(markup: string): string {
+  const open = markup.indexOf('>');            // end of the <svg ...> open tag
+  const close = markup.lastIndexOf('</svg>');
+  if (open < 0 || close < 0) return '';
+  let inner = markup.slice(open + 1, close);
+  // drop the shared <style> element — it is emitted once at page level instead
+  inner = inner.replace('<style>text{user-select:none}</style>', '');
+  return inner.trim();
+}
+
+export interface PageChordEntry {
+  id: string;              // stable chord id (used for the <g id>)
+  x: number; y: number;    // page coords of the chord box top-left
+  scale: number;           // uniform scale factor applied to the chord canvas
+  markup: string;          // full chord SVG from renderSvg(doc, effSettings)
+}
+
+/** Compose several chord SVGs onto one page-sized SVG (print/export friendly). */
+export function composePage(page: { w: number; h: number }, chords: PageChordEntry[], opts: { scale?: number; grid?: { size: number } | null } = {}): string {
+  const sc = opts.scale ?? 1;
+  const parts: string[] = [];
+  parts.push(`<svg xmlns="http://www.w3.org/2000/svg" width="${Math.round(page.w * sc)}" height="${Math.round(page.h * sc)}" viewBox="0 0 ${page.w} ${page.h}" data-w="${page.w}" data-h="${page.h}">`);
+  parts.push('<style>text{user-select:none}</style>');
+  parts.push(`<rect x="0" y="0" width="${page.w}" height="${page.h}" fill="#ffffff"/>`);
+  if (opts.grid) {
+    const g = Math.max(4, opts.grid.size);
+    parts.push(`<defs><pattern id="pagegrid" width="${g}" height="${g}" patternUnits="userSpaceOnUse"><path d="M ${g} 0 L 0 0 0 ${g}" fill="none" stroke="#dfe4ea" stroke-width="1"/></pattern></defs>`);
+    parts.push(`<rect x="0" y="0" width="${page.w}" height="${page.h}" fill="url(#pagegrid)"/>`);
+  }
+  for (const c of chords) {
+    const m = c.markup.match(/data-w="(\d+(?:\.\d+)?)" data-h="(\d+(?:\.\d+)?)"/);
+    const iw = m ? parseFloat(m[1]) : 320, ih = m ? parseFloat(m[2]) : 420;
+    parts.push(`<g transform="translate(${c.x.toFixed(1)},${c.y.toFixed(1)}) scale(${c.scale.toFixed(4)})">`);
+    parts.push(`<rect x="0" y="0" width="${iw}" height="${ih}" fill="#ffffff" stroke="#e3e7ec" stroke-width="1"/>`);
+    parts.push(svgInner(c.markup));
+    parts.push('</g>');
+  }
+  parts.push('</svg>');
+  return parts.join('\n');
 }
 
 // ---------------- interaction helpers shared with App ----------------

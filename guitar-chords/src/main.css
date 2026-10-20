@@ -148,3 +148,31 @@ body { font-family: 'Segoe UI', Arial, sans-serif; background: #eceff3; color: #
   background: #fff; border: 1px solid #d7d2e0; border-radius: 8px; padding: 3px 8px;
 }
 .quick-ovr input[type="range"] { width: 90px; accent-color: #7a5af8; }
+
+/* ---------- multi-page workspace ---------- */
+.canvas-area.page-canvas { display: block; padding: 16px; }
+.print-root { display: flex; flex-direction: column; align-items: center; gap: 22px; min-width: fit-content; }
+.page-sheet { position: relative; background: #fff; border-radius: 4px; box-shadow: 0 3px 14px rgba(0,0,0,.2); flex-shrink: 0; }
+.page-sheet.cur { outline: 2px solid #1f6feb; }
+.page-label { position: absolute; top: -20px; left: 2px; font-size: 11.5px; color: #5a6674; white-space: nowrap; }
+.page-svg-host { width: 100%; height: 100%; }
+.page-svg { max-width: 100%; height: auto; }
+.page-chord.sel rect:first-of-type { pointer-events: all; }
+
+.board-editor { width: min(94%, 860px); background: #fff; border-radius: 10px; box-shadow: 0 3px 14px rgba(0,0,0,.2); padding: 10px 14px 16px; }
+.board-editor-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+.board-editor-head .chord-name { width: 170px; }
+.board-editor-head .mini { margin-left: auto; color: #667; font-size: 11.5px; }
+.board-editor-body svg { max-width: 100%; height: auto; display: block; margin: 0 auto; }
+.board-editor-body { cursor: crosshair; }
+
+.page-tabs { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 8px; }
+.page-tab { background: #f2f4f7; border: 1px solid #ccd3da; border-radius: 6px; padding: 4px 9px; font-size: 12.5px; cursor: pointer; }
+.page-tab.cur { background: #d8e6fb; border-color: #7aa7e8; font-weight: 600; }
+.page-ops { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+.page-ops .btn { background: #eef1f5; color: #222; border-color: #ccd3da; }
+.page-ops .btn.danger { background: #b3261e; color: #fff; border-color: #d0554f; }
+.page-config { margin-top: 8px; }
+.page-config > summary { cursor: pointer; font-weight: 600; }
+.chord-actions { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
+.chord-mode-note { background: #fff8e1; border: 1px solid #f0d68a; border-radius: 6px; padding: 6px 8px; }

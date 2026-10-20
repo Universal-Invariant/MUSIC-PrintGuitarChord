@@ -81,19 +81,25 @@ export function suggestNoteNames(
 }
 
 /**
- * Pitch of a dot computed from the tuning and its position on the string.
- * The offset into the string is the RELATIVE fret (absFret − startFret), so a
- * dot placed on the first visible slot sounds one semitone above the open
- * string no matter which starting fret is selected. rel < 0 (open zone) ⇒ 0.
- * `tuning` is in DOT-model order (index 0 = high e .. 5 = low E).
+ * Pitch of a dot computed from the tuning and its REAL position on the string.
+ * The sounding pitch depends on the ABSOLUTE fret (the physical offset into the
+ * string from the nut), NOT on the relative slot index: with startFret = 5 a
+ * dot in the first visible slot sits on fret 5 → five semitones above open.
+ *   rel    = dot.fret − startFret   (slot shown on screen)
+ *   absFret = rel + startFret       (real fret on the neck)
+ * A dot in the floating open zone (rel < 0, i.e. absFret ≤ 0) sounds at the
+ * open pitch. `tuning` is in DOT-model order (index 0 = high e .. 5 = low E).
  */
-export function pitchAtRel(tuning: number[], string: number, rel: number, preferFlats = false): string {
+export function pitchAtRel(
+  tuning: number[], string: number, rel: number, preferFlats = false, startFret = 1,
+): string {
   const open = tuning[string] ?? tuning[0] ?? 64;
-  const fret = Math.max(0, rel); // open dots (rel === -1) sound at the open pitch
+  const absFret = rel + startFret;      // real fret number on the neck
+  const fret = Math.max(0, absFret);    // open dots (absFret ≤ 0) sound open
   return midiToName(open + fret, preferFlats);
 }
 
-/** Back-compat alias — absolute-fret spelling kept for older call sites. */
+/** Absolute-fret spelling (identical result — kept for clarity/older call sites). */
 export function pitchAtFret(tuning: number[], string: number, absFret: number, preferFlats = false): string {
-  return pitchAtRel(tuning, string, absFret, preferFlats);
+  return midiToName((tuning[string] ?? tuning[0] ?? 64) + Math.max(0, absFret), preferFlats);
 }
