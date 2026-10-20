@@ -753,11 +753,6 @@ export default function App() {
       handleInlineChordClick(id, e);                    // interior → add dots/text/etc.
       return;
     }
-    // ALWAYS re-derive the pointer position in THIS chord's page space at grab
-    // time. The sheet can be CSS-scaled (.page-svg max-width), so client px and
-    // SVG units differ by an unknown factor — anchoring here (and re-anchoring
-    // on every move through the same CTM) keeps the box glued to the cursor for
-    // EVERY chord, not just the first one.
     selectChord(id);
     startChordMove(id, e);
   };
@@ -843,8 +838,7 @@ export default function App() {
       return;
     }
     const { x, y } = toPageCoords(e);
-    if (!Number.isFinite(x)) return;          // page svg not registered yet
-    const cfg = pg.config;
+    const cfg = page.config;
     const ps = pageSizePx(cfg);
     const cur = pg.placements[ref.id];
     if (!cur) return;
@@ -853,10 +847,6 @@ export default function App() {
     if (!c) return;
     const es = mergeChordSettings(settings, c.settings);
     const nat = canvasSize(es);
-    // DELTA-based movement through the SHARED page CTM: grab offset
-    // (ox - sx) is added to the pointer's CURRENT page-space position. Both
-    // go through the same matrix, so any CSS scale of the sheet cancels
-    // exactly — the box tracks the cursor for every chord, first or last.
     let nx = snapVal(ref.ox + (x - ref.sx), cfg);
     let ny = snapVal(ref.oy + (y - ref.sy), cfg);
     nx = Math.max(0, Math.min(Math.max(0, ps.w - nat.w * cur.scale), nx));
@@ -1518,7 +1508,7 @@ export default function App() {
               return (
                 <div key={pv.id} className={`print-page page-sheet ${pi === pageIdx ? 'cur' : ''}`}
                   style={{ width: ps.w, height: ps.h } as React.CSSProperties}
-                  data-page={pv.name} data-page-idx={pi}>
+                  data-page={pv.name}>
                   <div className="page-label">{pv.name}{pi === pageIdx ? ' — editing' : ''}</div>
                   <div className="page-svg-host">
                     <svg xmlns="http://www.w3.org/2000/svg" width={ps.w} height={ps.h} viewBox={`0 0 ${ps.w} ${ps.h}`}
