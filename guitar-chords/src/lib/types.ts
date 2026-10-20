@@ -270,6 +270,40 @@ export interface PageDoc {
 }
 
 /** true ⇒ the placement box sits fully inside the page bounds. */
+/** Resolve a placement's position so it neither leaves the page nor overlaps
+ *  any of `others`. Searches outward from the original spot on a step grid and
+ *  returns the closest free position (falls back to the clamped original when
+ *  the page is full). Pure — does not mutate its arguments. */
+export function resolveCollision(
+  pl: ChordPlacement,
+  others: ChordPlacement[],
+  page: { w: number; h: number },
+  step = 10,
+): ChordPlacement {
+  const rectAt = (x: number, y: number): ChordPlacement => ({
+    ...pl,
+    x: Math.max(0, Math.min(Math.max(0, page.w - pl.w * pl.scale), x)),
+    y: Math.max(0, Math.min(Math.max(0, page.h - pl.h * pl.scale), y)),
+  });
+  const collides = (r: ChordPlacement) => others.some(o => placementsOverlap(r, o));
+  if (!collides(pl)) return pl;
+  for (let radius = 1; radius <= 60; radius++) {
+    let best: ChordPlacement | null = null;
+    let bestD = Infinity;
+    for (let dy = -radius; dy <= radius; dy++) {
+      for (let dx = -radius; dx <= radius; dx++) {
+        if (Math.abs(dx) !== radius && Math.abs(dy) !== radius) continue;
+        const cand = rectAt(pl.x + dx * step, pl.y + dy * step);
+        if (collides(cand)) continue;
+        const d = Math.hypot(cand.x - pl.x, cand.y - pl.y);
+        if (d < bestD) { bestD = d; best = cand; }
+      }
+    }
+    if (best) return best;
+  }
+  return rectAt(pl.x, pl.y); // page is full — keep it at least inside the page
+}
+
 export function fitsPage(pl: ChordPlacement, page: { w: number; h: number }): boolean {
   return pl.x >= 0 && pl.y >= 0 && pl.x + pl.w <= page.w && pl.y + pl.h <= page.h;
 }
