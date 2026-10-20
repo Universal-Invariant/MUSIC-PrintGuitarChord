@@ -6,7 +6,7 @@ import {
 } from './lib/types';
 import { composePage, cycleColorIndices, cycleShapeIndices, makeDot, renderSvg, svgInner } from './lib/render';
 import {
-  NUM_STRINGS, canvasSize, cellCenter, fingeringPos, fretPositions, hitTest,
+  NUM_STRINGS, canvasSize, cellCenter, dotAlongFret, fingeringPos, fretPositions, hitTest,
   nutZoneDepth, project, stringLayout, unproject,
 } from './lib/geometry';
 import {
@@ -58,9 +58,11 @@ export default function App() {
   useEffect(() => { saveActivePageId(pages[pageIdx]?.id ?? null); }, [pages, pageIdx]);
 
   const page = pages[pageIdx];
+  // NOTE: read the live index from pageIdxRef (not a captured `pageIdx`) so
+  // callbacks created before a page switch still target the CURRENT page.
   const setPage = useCallback((fn: (p: PageDoc) => PageDoc) => {
-    setPages(list => list.map((p, i) => (i === pageIdx ? fn(structuredClone(p)) : p)));
-  }, [pageIdx]);
+    setPages(list => list.map((p, i) => (i === pageIdxRef.current ? fn(structuredClone(p)) : p)));
+  }, []);
 
   /** Post-process a page so NO chord box overlaps another. Chords that do are
    *  nudged to the nearest free spot by resolveCollision(). Applied after every
@@ -96,7 +98,7 @@ export default function App() {
   useEffect(() => { localStorage.setItem('gcd.inlineEdit', inlineEdit ? '1' : '0'); }, [inlineEdit]);
   const [dragging, setDragging] = useState(false);       // text-box drag inside a chord
   const [pageDrag, setPageDrag] = useState(false);       // chord box drag on the page
-  const dragRef = useRef<{ id: string; dx: number; dy: number } | null>(null);
+  const dragRef = useRef<{ id: string; kind: 'dot' | 'text'; itemId: string; dx: number; dy: number } | null>(null);
   const pageDragRef = useRef<{ id: string; sx: number; sy: number; ox: number; oy: number } | null>(null);
   const boardWrapRef = useRef<HTMLDivElement>(null);
   const printRef = useRef<HTMLDivElement>(null);
@@ -221,6 +223,10 @@ export default function App() {
 
   // ---------- rendering ----------
   const size = useMemo(() => canvasSize(eff), [eff]);
+  // live ref so drag handlers (created once per render) always measure
+  // against the CURRENT board, never a stale closure value
+  const sizeRef = useRef(size);
+  useEffect(() => { sizeRef.current = size; }, [size]);
   const boardMarkup = useMemo(
     () => (entry ? renderSvg(entry, eff, { customs }) : ''),
     [entry, eff, customs],
@@ -475,7 +481,10 @@ export default function App() {
     const es = mergeChordSettings(settings, ctx.doc.settings);
     let best: { d: number; sel: Sel } = { d: 26, sel: null };
     for (const d of ctx.doc.dots) {
-      const c = cellCenter(es, d.string, d.fret - es.startFret);
+      // dots snap to fret slots while dragging, so compare against the slot's
+      // along-coordinate — not the raw center (a dot dragged off-center by its
+      // grab offset must still be grabbable near its rendered position).
+      const c = cellCenter(es, d.string, dotAlongFret(es, d.fret - es.startFret, fretPositions(es)));
       const dist = Math.hypot(c.x - x, c.y - y);
       if (dist < best.d) best = { d: dist, sel: { kind: 'dot', id: d.id } };
     }
@@ -491,34 +500,80 @@ export default function App() {
     return best.sel;
   };
 
+  /** Grab an existing dot or text box of chord `id` for dragging. `local` is in
+   *  that chord's own canvas space. Returns true when a drag started. */
+  const beginItemDrag = (id: string, s: NonNullable<Sel>, local: { x: number; y: number }): boolean => {
+    const ctx = textDragCtx(id);
+    if (!ctx) return false;
+    if (s.kind === 'text') {
+      const t = ctx.doc.texts.find(tt => tt.id === s.id);
+      if (!t) return false;
+      dragRef.current = { id, kind: 'text', itemId: t.id, dx: local.x - t.x * ctx.w, dy: local.y - t.y * ctx.h };
+    } else if (s.kind === 'dot') {
+      const d = ctx.doc.dots.find(dd => dd.id === s.id);
+      if (!d) return false;
+      const es = mergeChordSettings(settings, ctx.doc.settings);
+      const c = cellCenter(es, d.string, dotAlongFret(es, d.fret - es.startFret, fretPositions(es)));
+      dragRef.current = { id, kind: 'dot', itemId: d.id, dx: local.x - c.x, dy: local.y - c.y };
+    } else return false;
+    beginDragHistory();          // ONE snapshot for the whole drag gesture
+    setDragging(true);
+    setSel(s);
+    return true;
+  };
+
   /** Grab a text box of chord `id`. `local` is in that chord's own canvas space.
    *  Returns true when a drag started. */
   const beginTextDrag = (id: string, local: { x: number; y: number }): boolean => {
     const ctx = textDragCtx(id);
     if (!ctx) return false;
     const s = pickItemAt(id, local.x, local.y);
-    if (s && s.kind === 'text') {
-      const t = ctx.doc.texts.find(tt => tt.id === s.id)!;
-      dragRef.current = { id, dx: local.x - t.x * ctx.w, dy: local.y - t.y * ctx.h };
-      beginDragHistory();          // ONE snapshot for the whole drag gesture
-      setDragging(true);
-      setSel(s);
-      return true;
-    }
+    if (s && s.kind === 'text') return beginItemDrag(id, s, local);
     return false;
   };
 
-  const applyTextDrag = (local: { x: number; y: number }) => {
+  const applyItemDrag = (local: { x: number; y: number }) => {
     const ref = dragRef.current;
     if (!ref || !sel) return;
     const ctx = textDragCtx(ref.id);
     if (!ctx) return;
-    const nx = (local.x - ref.dx) / ctx.w;
-    const ny = (local.y - ref.dy) / ctx.h;
-    setPageNoHist(p => {           // intermediate moves never touch history
+    if (ref.kind === 'text') {
+      const nx = (local.x - ref.dx) / ctx.w;
+      const ny = (local.y - ref.dy) / ctx.h;
+      setPageNoHist(p => {           // intermediate moves never touch history
+        const i = p.chords.findIndex(c => c.id === ref.id);
+        if (i < 0) return p;
+        p.chords[i].texts = p.chords[i].texts.map(t => (t.id === ref.itemId ? { ...t, x: nx, y: ny } : t));
+        return p;
+      });
+      return;
+    }
+    // DOT drag: live-drag through the board matrix, then SNAP to the nearest
+    // string + fret slot (open zone included) — same semantics as clicking.
+    const es = mergeChordSettings(settings, ctx.doc.settings);
+    const strings = stringLayout(es);
+    let strIdx = 0, bestA = Infinity;
+    for (let i = 0; i < NUM_STRINGS; i++) {
+      const u = unproject(es, local.x - ref.dx, local.y - ref.dy);
+      const d = Math.abs(u.a - strings[i].offset);
+      if (d < bestA) { bestA = d; strIdx = i; }
+    }
+    const u = unproject(es, local.x - ref.dx, local.y - ref.dy);
+    let rel = u.t < 0 ? -1 : (() => {
+      const positions = fretPositions(es);
+      let slot = positions.length - 2;
+      for (let i = 0; i < positions.length - 1; i++) {
+        if (u.t <= (positions[i] + positions[i + 1]) / 2) { slot = i; break; }
+      }
+      return Math.max(0, slot);
+    })();
+    rel = Math.min(rel, es.numFrets - 1);
+    const absFret = es.startFret + rel;
+    setPageNoHist(p => {
       const i = p.chords.findIndex(c => c.id === ref.id);
       if (i < 0) return p;
-      p.chords[i].texts = p.chords[i].texts.map(t => (t.id === sel.id ? { ...t, x: nx, y: ny } : t));
+      p.chords[i].dots = p.chords[i].dots.map(d =>
+        d.id === ref.itemId ? { ...d, string: strIdx, fret: absFret } : d);
       return p;
     });
   };
@@ -529,7 +584,7 @@ export default function App() {
   };
   const onBoardPointerMove = (e: React.MouseEvent) => {
     if (!dragging || !dragRef.current || !sel) return;
-    applyTextDrag(toBoardCoords(e));
+    applyItemDrag(toBoardCoords(e));
   };
   const onBoardPointerUp = () => {
     if (dragging) {
@@ -596,14 +651,26 @@ export default function App() {
     const c = page.chords.find(cc => cc.id === id);
     if (!c) return;
     const es = mergeChordSettings(settings, c.settings);
+
+    // Resolve WHICH item sits under the cursor BEFORE deciding the gesture —
+    // grabbing an existing dot/text must always win over "add a new dot",
+    // otherwise dots could never be moved or opened in the dialog.
+    const near = pickItemAt(id, local.x, local.y);
+
     const now = performance.now();
     const prev = lastClickRef.current;
     if (prev && prev.id === id && now - prev.t < 400 && Math.hypot(e.clientX - prev.x, e.clientY - prev.y) < 8) {
       lastClickRef.current = null;                      // double-click → edit dialog
-      openEditLocal(local, id);                         // works for ANY chord now
+      if (near) { setSel(near); setEditing(near); }     // works for ANY chord now
+      else openEditLocal(local, id);
       return;
     }
     lastClickRef.current = { x: e.clientX, y: e.clientY, t: now, id };
+
+    // Grab an existing dot (any tool) or text box (select tool) → drag it.
+    if (near && ((near.kind === 'dot') || (tool === 'select' && near.kind === 'text'))) {
+      if (beginItemDrag(id, near, local)) return;
+    }
 
     if (tool === 'dot') {
       const hit = hitSlotLenient(es, local.x, local.y);
@@ -624,7 +691,6 @@ export default function App() {
 
     // other tools / select: act through the shared handlers on the clicked chord
     if (id !== selectedId) selectChord(id);
-    if (tool === 'select') { beginTextDrag(id, local); return; }
     // editing tools (text/fing/select-pick): operate directly on the CLICKED
     // chord — no stale-render dependency, so it works even when the click
     // also just changed the selection.
@@ -719,11 +785,11 @@ export default function App() {
     setPageDrag(true);
   };
   const onChordBoxMove = (e: React.MouseEvent) => {
-    // inline-edit: dragging a TEXT BOX inside a chord moves the text, not the box
+    // inline-edit: dragging a DOT or TEXT BOX inside a chord moves the item, not the box
     if (dragging && dragRef.current && sel) {
       const cid = chordAtClient(e.clientX, e.clientY) ?? dragRef.current.id;
       const local = toChordLocalById(cid, e.clientX, e.clientY);
-      if (local) applyTextDrag(local);
+      if (local) applyItemDrag(local);
       return;
     }
     const ref = pageDragRef.current;
@@ -1457,7 +1523,14 @@ export default function App() {
                   <div className="page-svg-host">
                     <svg xmlns="http://www.w3.org/2000/svg" width={ps.w} height={ps.h} viewBox={`0 0 ${ps.w} ${ps.h}`}
                       className="page-svg" style={{ display: 'block' }}
-                      ref={el => { if (el) svgRefs.current.set(pi, el); else svgRefs.current.delete(pi); }}
+                      ref={el => {
+                        // ALWAYS set-or-replace with the live element: React may
+                        // call the old ref's null-cleanup AFTER the new one is
+                        // attached; unconditional delete would then leave a
+                        // STALE entry that poisons pageAtClient() hit-testing.
+                        if (el) svgRefs.current.set(pi, el);
+                        else if (svgRefs.current.get(pi) === el || !el) svgRefs.current.delete(pi);
+                      }}
                       onMouseDown={pi === pageIdx ? onPageBackgroundDown : undefined}>
                       {pv.config.showGrid && (
                         <>
@@ -1478,7 +1551,14 @@ export default function App() {
                           <g key={c.id} transform={`translate(${c.x},${c.y}) scale(${c.scale})`}
                             className={`page-chord ${cur ? 'sel' : ''} ${inline ? 'inline-edit' : ''}`}
                             style={{ cursor: pi === pageIdx ? (inline && tool !== 'select' ? 'crosshair' : 'move') : 'default' }}
-                            ref={el => { if (el) gRefs.current.set(c.id, el); else gRefs.current.delete(c.id); }}
+                            ref={el => {
+                              // set-or-replace (never blind-delete): a stale
+                              // cleanup call must not remove the NEW element
+                              // React attaches during re-render, or hit-testing
+                              // silently loses that chord.
+                              if (el) gRefs.current.set(c.id, el);
+                              else if (!el) gRefs.current.delete(c.id);
+                            }}
                             onMouseDown={pi === pageIdx ? (e) => onChordBoxDown(e, c.id) : undefined}
                             onDoubleClick={inline ? (e) => { e.preventDefault(); e.stopPropagation(); } : undefined}
                             onContextMenu={inline ? (e) => { e.preventDefault(); e.stopPropagation(); handleInlineChordClick(c.id, e); } : undefined}>
