@@ -140,14 +140,22 @@ export function stringLayout(s: Settings): { offset: number; width: number }[] {
 }
 
 /** Floating zone depth before the first fret line (for open-note dots & string pitches).
- *  Deeper when the nut bar itself is shown (startFret === 1). */
+ *  Deeper when the nut bar itself is shown (startFret === 1); it also grows with the
+ *  user-configurable open-pitch ring offset so the ring never overlaps the open dots. */
 export function nutZoneDepth(s: Settings): number {
-  return nutShown(s) ? Math.max(30, s.nutWidth + 24) : OPEN_ZONE;
+  const base = nutShown(s) ? Math.max(30, s.nutWidth + 24) : OPEN_ZONE;
+  return base + openNoteExtra(s);
+}
+
+/** Extra room reserved for the open-string pitch ring beyond its default position. */
+export function openNoteExtra(s: Settings): number {
+  if (!s.openNoteLabels) return 0;
+  return Math.max(0, Math.min(160, s.openNoteOffset ?? 0));
 }
 
 /** Extra reserved band PAST the last fret line (fingerings + string pitches on the far side). */
 export function farBand(s: Settings): number {
-  const pitches = s.openSide === 'far' ? 26 : 0;
+  const pitches = s.openSide === 'far' && s.openNoteLabels ? 26 + openNoteExtra(s) : 0;
   return Math.max(FING_BAND, 24 + pitches);
 }
 
@@ -303,10 +311,13 @@ export function fingeringPos(s: Settings, string: number): { x: number; y: numbe
 }
 
 /** Along-axis logical coordinate where the string open-pitches (e B G D A E) sit.
- *  'nut' side ⇒ floating zone before the first fret line; 'far' side ⇒ past the last fret. */
+ *  'nut' side ⇒ floating zone before the first fret line; 'far' side ⇒ past the last fret.
+ *  The user offset slides the ring further AWAY from the board in both cases, so it
+ *  never collides with the open (rel −1) note dots. */
 export function stringLabelAlong(s: Settings): number {
-  if (s.openSide === 'far') return fretLength(s) + 14;
-  return -nutZoneDepth(s) * 0.8;
+  const extra = Math.max(0, Math.min(160, s.openNoteOffset ?? 0));
+  if (s.openSide === 'far') return fretLength(s) + 14 + extra;
+  return -nutZoneDepth(s) + 8 + extra;
 }
 
 /** Parse a page-style fret-number list ("3-5, 8, 12", "all", "none"/"" ⇒ empty). */

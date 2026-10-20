@@ -12,13 +12,17 @@ interface Props {
   onChange: (s: Settings) => void;
   customs: Record<string, string>;
   onCustomsChange: (c: Record<string, string>) => void;
+  /** When set, the panel edits ONE chord's layout patch (multi-chord page mode). */
+  chordMode?: boolean;
+  /** Extra actions rendered at the top of the per-chord panel (copy/paste settings). */
+  extraActions?: React.ReactNode;
 }
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return <details className="section"><summary>{title}</summary><div className="sec-body">{children}</div></details>;
 }
 
-export default function SettingsPanel({ settings, onChange, customs, onCustomsChange }: Props) {
+export default function SettingsPanel({ settings, onChange, customs, onCustomsChange, chordMode, extraActions }: Props) {
   const s = settings;
   const set = (patch: Partial<Settings>) => onChange({ ...s, ...patch });
   const setColor = (key: keyof Settings, c: ChordColor) => set({ [key]: c } as Partial<Settings>);
@@ -81,6 +85,8 @@ export default function SettingsPanel({ settings, onChange, customs, onCustomsCh
 
   return (
     <div className="settings">
+      {chordMode && <div className="mini-note chord-mode-note">Editing layout of the <b>selected chord</b>. Every chord keeps its own settings — use Copy/Paste below to transfer them.</div>}
+      {extraActions && <div className="chord-actions">{extraActions}</div>}
       <Section title="Fretboard geometry">
         <label className="row"><span>Frets displayed</span>
           <input type="number" min={MIN_NUM_FRETS} max={27} value={s.numFrets} onChange={e => set({ numFrets: clampNumFrets(Number(e.target.value)) })} /></label>
@@ -157,11 +163,20 @@ export default function SettingsPanel({ settings, onChange, customs, onCustomsCh
             <input className="txt" placeholder="e.g. 3-5, 8, 12  (or: all)" value={s.fretLabelList} onChange={e => set({ fretLabelList: e.target.value })} /></label>
           <div className="mini-note">Page-style list: single numbers, ranges with “-“, or “all”. Only frets inside the displayed range appear.</div>
         </>}
-        <label className="row"><span>Open string pitches (e B G D A E)</span>
-          <select value={s.openSide} onChange={e => set({ openSide: e.target.value as Settings['openSide'] })}>
+        <label className="row check"><input type="checkbox" checked={s.openNoteLabels !== false} onChange={e => set({ openNoteLabels: e.target.checked })} /><span>Show open-string note labels (pitch names beside the strings)</span></label>
+        <label className="row"><span>Open string pitches side</span>
+          <select value={s.openSide} onChange={e => set({ openSide: e.target.value as Settings['openSide'] })} disabled={!s.openNoteLabels}>
             <option value="nut">At the nut end</option>
             <option value="far">At the opposite end</option>
           </select></label>
+        <label className="row"><span>Open label offset (px)</span>
+          <input type="range" min={0} max={160} value={s.openNoteOffset ?? 0} disabled={!s.openNoteLabels}
+            onChange={e => set({ openNoteOffset: Number(e.target.value) })} /><b style={{ fontSize: 11 }}>{s.openNoteOffset ?? 0}</b></label>
+        <div className="mini-note">The ring shows the actual pitch names computed from the tuning (they update live when you change a tuning preset). Increase the offset if the labels overlap the open-position note dots.</div>
+        <label className="row"><span>Fret line length (%)</span>
+          <input type="range" min={50} max={150} value={s.fretWidthPct ?? 100}
+            onChange={e => set({ fretWidthPct: Number(e.target.value) })} /><b style={{ fontSize: 11 }}>{s.fretWidthPct ?? 100}%</b></label>
+        <div className="mini-note">Length of every fret line across the board. 100% ⇒ frets span the full taper width, edge to edge (this also scales with the taper).</div>
         <label className="row"><span>Fret spacing mode</span>
           <select value={s.spacing} onChange={e => set({ spacing: e.target.value as Settings['spacing'] })}>
             <option value="equal">Equal</option>
@@ -292,16 +307,16 @@ export default function SettingsPanel({ settings, onChange, customs, onCustomsCh
           </select></label>
       </Section>
 
-      <Section title="Export">
+      {chordMode ? null : <Section title="Export">
         <label className="row"><span>Scale / size multiplier</span>
           <select value={String(s.exportScale)} onChange={e => set({ exportScale: Number(e.target.value) })}>
             {[1, 2, 3, 4].map(v => <option key={v} value={v}>{v}×</option>)}
           </select></label>
         <label className="row"><span>JPG/PNG quality</span>
           <input type="range" min={30} max={100} value={Math.round(s.exportQuality * 100)} onChange={e => set({ exportQuality: Number(e.target.value) / 100 })} /></label>
-      </Section>
+      </Section>}
 
-      <button className="btn" onClick={() => onChange(structuredClone(DEFAULT_SETTINGS))}>Reset all settings</button>
+      {!chordMode && <button className="btn" onClick={() => onChange(structuredClone(DEFAULT_SETTINGS))}>Reset all settings</button>}
     </div>
   );
 }

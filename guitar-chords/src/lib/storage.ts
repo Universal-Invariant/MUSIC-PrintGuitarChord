@@ -1,7 +1,7 @@
 // ---------- Persistence + defaults + export ----------
 
-import type { ChordColor, ChordDoc, Settings } from './types';
-import { BLACK, WHITE } from './types';
+import type { ChordColor, ChordDoc, ChordPlacement, PageConfig, PageDoc, Settings } from './types';
+import { BLACK, WHITE, uid } from './types';
 import { STANDARD_SHAPES } from './shapes';
 import { TUNING_HIGH_TO_LOW } from './music';
 
@@ -58,6 +58,9 @@ export const DEFAULT_SETTINGS: Settings = {
   showDots: true,
   noteVisible: false,
   dotTextColor: { hex: '#ffffff', alpha: 1 },
+  openNoteLabels: true,
+  openNoteOffset: 14,
+  fretWidthPct: 100,
   tuning: [...TUNING_HIGH_TO_LOW],
   preferFlats: false,
   dotMarkerColor: { hex: '#c8bcd0', alpha: 0.9 },
@@ -83,8 +86,98 @@ export const DEFAULT_SETTINGS: Settings = {
   exportQuality: 0.92,
 };
 
-export function emptyChord(): ChordDoc {
-  return { name: 'Untitled', dots: [], texts: [], fingerings: [] };
+export function emptyChord(name = 'Untitled'): ChordDoc {
+  return { id: uid('chord'), name, dots: [], texts: [], fingerings: [] };
+}
+
+// ---------- page (multi-chord canvas) model ----------
+
+export const DEFAULT_PAGE_CONFIG: PageConfig = {
+  size: 'letter',
+  landscape: false,
+  customW: 816,
+  customH: 1056,
+  showGrid: true,
+  snap: true,
+  gridSize: 20,
+};
+
+export function emptyPage(name = 'My page'): PageDoc {
+  return { id: uid('page'), name, config: { ...DEFAULT_PAGE_CONFIG }, chords: [], placements: {}, selected: null };
+}
+
+/** Deep copy of a page with fresh ids (page + every chord) — "Duplicate page". */
+export function duplicatePage(p: PageDoc, name?: string): PageDoc {
+  const copy = structuredClone(p);
+  copy.id = uid('page');
+  copy.name = name ?? `${p.name} copy`;
+  const remap: Record<string, string> = {};
+  for (const c of copy.chords) {
+    const old = c.id;
+    c.id = uid('chord');
+    remap[old] = c.id;
+    for (const d of c.dots) d.id = uid('dot');
+    for (const t of c.texts) t.id = uid('text');
+    for (const f of c.fingerings) f.id = uid('fing');
+  }
+  const pl: PageDoc['placements'] = {};
+  for (const [old, v] of Object.entries(copy.placements)) pl[remap[old] ?? old] = v;
+  copy.placements = pl;
+  copy.selected = p.selected ? (remap[p.selected] ?? null) : null;
+  return copy;
+}
+
+// ---------- multi-page composition ----------
+
+/** A page row used when printing/exporting several pages at once. */
+export interface ComposeRow {
+  w: number; h: number;
+  chords: { id: string; x: number; y: number; scale: number; markup: string }[];
+}
+
+/** Pack chord entries into rows of width ≤ maxW (row height = tallest member). */
+export function packRows(
+  items: { entry: ChordDoc; pl: ChordPlacement; markup: string; iw: number; ih: number }[],
+  maxW: number, margin: number, gap: number,
+): { w: number; h: number; chords: ComposeRow['chords'] }[] {
+  const rows: { w: number; h: number; chords: ComposeRow['chords'] }[] = [];
+  let cur: typeof rows[number] = { w: 0, h: 0, chords: [] };
+  let x = margin;
+  const flush = () => { if (cur.chords.length) { rows.push(cur); } cur = { w: 0, h: 0, chords: [] }; x = margin; };
+  for (const it of items) {
+    const sw = it.iw * it.pl.scale, sh = it.ih * it.pl.scale;
+    if (cur.chords.length && x + sw + margin > maxW) flush();
+    cur.chords.push({ id: it.entry.id, x, y: 0, scale: it.pl.scale, markup: it.markup });
+    cur.w = Math.max(cur.w, x + sw + margin);
+    cur.h = Math.max(cur.h, sh);
+    x += sw + gap;
+  }
+  flush();
+  return rows;
+}
+
+/** Distribute packed rows onto pages of the given size; rows never split across pages. */
+export function paginateRows(
+  rows: { w: number; h: number; chords: ComposeRow['chords'] }[],
+  pageSize: { w: number; h: number }, margin: number, gap: number,
+): ComposeRow[] {
+  const pages: ComposeRow[] = [];
+  let current: ComposeRow['chords'] = [];
+  let cy = margin;
+  const newPage = () => {
+    pages.push({ w: pageSize.w, h: pageSize.h, chords: current });
+    current = [];
+    cy = margin;
+  };
+  for (const row of rows) {
+    // start a fresh page when this row no longer fits below the already-placed ones
+    if (current.length && cy + row.h > pageSize.h - margin) newPage();
+    for (const c of row.chords) current.push({ ...c, y: cy });
+    cy += row.h + gap;
+  }
+  // always emit at least one page (even an empty one)
+  pages.push({ w: pageSize.w, h: pageSize.h, chords: current });
+  return pages;
 }
 
 // ---------- localStorage ----------
@@ -92,14 +185,31 @@ export function emptyChord(): ChordDoc {
 const LS_CHORDS = 'gchords.list.v1';
 const LS_SETTINGS = 'gchords.settings.v1';
 const LS_CUSTOM = 'gchords.customshapes.v1';
+const LS_PAGES = 'gchords.pages.v1';
+const LS_ACTIVE = 'gchords.active.v1';
 
 export function loadChordList(): ChordDoc[] {
   try {
     const raw = localStorage.getItem(LS_CHORDS);
     if (!raw) return [];
     const arr = JSON.parse(raw);
-    return Array.isArray(arr) ? arr : [];
+    if (!Array.isArray(arr)) return [];
+    // migrate: every chord needs a stable id (older saves may lack it)
+    for (const c of arr) if (!c || typeof c !== 'object') continue;
+    return arr.filter(c => c && typeof c === 'object').map(c => normalizeChord(c));
   } catch { return []; }
+}
+
+/** Ensure a stored object is a well-formed ChordDoc (id, arrays). */
+export function normalizeChord(c: Partial<ChordDoc> & Record<string, unknown>): ChordDoc {
+  return {
+    id: typeof c.id === 'string' && c.id ? c.id : uid('chord'),
+    name: typeof c.name === 'string' ? c.name : 'Untitled',
+    dots: Array.isArray(c.dots) ? c.dots : [],
+    texts: Array.isArray(c.texts) ? c.texts : [],
+    fingerings: Array.isArray(c.fingerings) ? c.fingerings : [],
+    settings: (c.settings && typeof c.settings === 'object') ? c.settings as Partial<Settings> : undefined,
+  };
 }
 export function saveChordList(list: ChordDoc[]) {
   localStorage.setItem(LS_CHORDS, JSON.stringify(list));
@@ -128,6 +238,11 @@ export function loadSettings(): Settings {
     if (typeof merged.reverseStrings !== 'boolean') merged.reverseStrings = false;
     if (merged.taperMode !== 'absolute' && merged.taperMode !== 'relative') merged.taperMode = DEFAULT_SETTINGS.taperMode;
     if (typeof merged.noteVisible !== 'boolean') merged.noteVisible = false;
+    if (typeof merged.openNoteLabels !== 'boolean') merged.openNoteLabels = true;
+    if (typeof merged.openNoteOffset !== 'number' || !Number.isFinite(merged.openNoteOffset)) merged.openNoteOffset = DEFAULT_SETTINGS.openNoteOffset;
+    merged.openNoteOffset = Math.max(0, Math.min(160, merged.openNoteOffset));
+    if (typeof merged.fretWidthPct !== 'number' || !Number.isFinite(merged.fretWidthPct)) merged.fretWidthPct = 100;
+    merged.fretWidthPct = Math.max(50, Math.min(150, merged.fretWidthPct));
     if (typeof merged.preferFlats !== 'boolean') merged.preferFlats = false;
     // tuning: 6 MIDI numbers, dot-model order (index 0 = high e .. 5 = low E)
     if (!Array.isArray(merged.tuning) || merged.tuning.length !== 6 || merged.tuning.some(v => typeof v !== 'number' || !Number.isFinite(v))) {
@@ -166,6 +281,68 @@ export function saveCustomShapes(map: Record<string, string>) {
   localStorage.setItem(LS_CUSTOM, JSON.stringify(map));
 }
 
+// ---------- pages ----------
+
+export function loadPages(): PageDoc[] {
+  try {
+    const raw = localStorage.getItem(LS_PAGES);
+    if (!raw) return [];
+    const arr = JSON.parse(raw);
+    if (!Array.isArray(arr)) return [];
+    return arr.filter(p => p && typeof p === 'object').map(normalizePage);
+  } catch { return []; }
+}
+export function savePages(list: PageDoc[]) {
+  localStorage.setItem(LS_PAGES, JSON.stringify(list));
+}
+export function loadActivePageId(): string | null {
+  try { return localStorage.getItem(LS_ACTIVE); } catch { return null; }
+}
+export function saveActivePageId(id: string | null) {
+  try {
+    if (id) localStorage.setItem(LS_ACTIVE, id);
+    else localStorage.removeItem(LS_ACTIVE);
+  } catch { /* ignore */ }
+}
+
+/** Ensure a stored object is a well-formed PageDoc. */
+export function normalizePage(p: Partial<PageDoc> & Record<string, unknown>): PageDoc {
+  const cfgIn = (p.config && typeof p.config === 'object') ? p.config as Partial<PageConfig> : {};
+  const num = (v: unknown, d: number) => (typeof v === 'number' && Number.isFinite(v) ? v : d);
+  const sizeOk = ['letter', 'legal', 'a4', 'a3', 'custom'].includes(String(cfgIn.size)) ? cfgIn.size as PageConfig['size'] : DEFAULT_PAGE_CONFIG.size;
+  const cfg: PageConfig = {
+    size: sizeOk,
+    landscape: !!cfgIn.landscape,
+    customW: Math.max(200, Math.min(4000, Math.round(num(cfgIn.customW, DEFAULT_PAGE_CONFIG.customW)))),
+    customH: Math.max(200, Math.min(4000, Math.round(num(cfgIn.customH, DEFAULT_PAGE_CONFIG.customH)))),
+    showGrid: cfgIn.showGrid !== false,
+    snap: cfgIn.snap !== false,
+    gridSize: Math.max(5, Math.min(100, Math.round(num(cfgIn.gridSize, DEFAULT_PAGE_CONFIG.gridSize)))),
+  };
+  const chords = Array.isArray(p.chords)
+    ? p.chords.filter((c: unknown) => c && typeof c === 'object').map((c: unknown) => normalizeChord(c as Record<string, unknown>))
+    : [];
+  const placements: PageDoc['placements'] = {};
+  const pin = (p.placements && typeof p.placements === 'object') ? p.placements as Record<string, unknown> : {};
+  for (const c of chords) {
+    const raw = pin[c.id];
+    if (raw && typeof raw === 'object') {
+      const r = raw as Record<string, unknown>;
+      const n = (v: unknown, d: number) => (typeof v === 'number' && Number.isFinite(v) ? v : d);
+      placements[c.id] = {
+        x: n(r.x, 60), y: n(r.y, 60), w: n(r.w, 320), h: n(r.h, 420),
+        scale: Math.max(0.2, Math.min(3, n(r.scale, 1))),
+      };
+    }
+  }
+  const sel = typeof p.selected === 'string' && chords.some(c => c.id === p.selected) ? p.selected : (chords[0]?.id ?? null);
+  return {
+    id: typeof p.id === 'string' && p.id ? p.id : uid('page'),
+    name: typeof p.name === 'string' ? p.name : 'My page',
+    config: cfg, chords, placements, selected: sel,
+  };
+}
+
 // ---------- chord <-> doc conversion ----------
 
 /** Build a ChordDoc from a library chord (shape array low-E..high-e; null=muted). */
@@ -196,7 +373,7 @@ export function chordFromLibrary(name: string, shape: (number | null)[], fingeri
     size: 15,
     color: { hex: '#333333', alpha: 1 } as ChordColor,
   }));
-  return { name, dots, texts: [], fingerings: fing };
+  return { id: uid('chord'), name, dots, texts: [], fingerings: fing };
 }
 
 // ---------- export ----------

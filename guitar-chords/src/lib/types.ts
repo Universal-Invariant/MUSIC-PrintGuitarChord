@@ -106,6 +106,11 @@ export interface Settings {
                              // (computed from the string tuning + absolute fret);
                              // a manually typed dot text still wins over the pitch.
   dotTextColor: ChordColor;  // color used for those automatic pitch labels
+  openNoteLabels: boolean;   // true ⇒ the open-string pitch ring (e B G D A E) is shown
+  openNoteOffset: number;    // px — extra distance of that ring away from the board,
+                             // so it never overlaps the open (rel −1) note dots.
+  fretWidthPct: number;      // 50..150 — fret-line length as % of the full taper width
+                             // (100% ⇒ every fret spans the board edge to edge)
   tuning: number[];          // open-string MIDI numbers, model order: index 0 = high e .. 5 = low E
   preferFlats: boolean;      // spell auto pitches with flats instead of sharps
   dotMarkerColor: ChordColor;
@@ -134,11 +139,14 @@ export interface Settings {
 }
 
 export interface ChordDoc {
+  id: string;                   // stable identity (survives renames)
   name: string;
   dots: Dot[];
   texts: TextBox[];
   fingerings: Fingering[];
-  settings?: Partial<Settings>; // optional per-chord layout override
+  settings?: Partial<Settings>; // PER-CHORD layout override — each chord keeps its own
+                                // starting fret, frets displayed, taper, spacing etc.
+                                // The effective settings = global defaults ⊕ this patch.
 }
 
 // ---------- helpers ----------
@@ -187,6 +195,105 @@ const DEFAULT_NUM_FRETS_CLAMP = 5;
 export function clampStartFret(v: number): number {
   if (!Number.isFinite(v)) return 1;
   return Math.max(1, Math.min(24, Math.round(v)));
+}
+
+// ---------- multi-chord document model ----------
+//
+// A Page holds several ChordDocs. Each chord carries its OWN layout patch
+// (`chord.settings`); the effective settings of a chord are
+//   globalDefaults ⊕ chordPatch
+// so every chord can have its own starting fret / frets displayed / taper /
+// spacing etc., while shared data (color basket, shape list) stays global.
+
+/** The keys that make up the per-chord geometry/appearance patch. */
+export const CHORD_SETTING_KEYS: (keyof Settings)[] = [
+  'numFrets', 'startFret', 'orientation', 'flipAlong', 'flipAcross',
+  'fretSpacing', 'stringGap', 'stringWidthMode', 'minStringWidth', 'maxStringWidth',
+  'nutWidth', 'fretThickness', 'reverseStrings', 'boardTaper', 'taperMode',
+  'fretLabels', 'fretLabelList', 'openSide', 'margins', 'spacing',
+  'firstFretSize', 'lastFretSize', 'showDots', 'noteVisible', 'dotTextColor',
+  'openNoteLabels', 'openNoteOffset', 'tuning', 'preferFlats',
+  'dotMarkerColor', 'bgFill', 'fretColor', 'stringColor',
+  'baseDotSize', 'shapeScale', 'fretWidthPct', 'defaultTextFont', 'defaultTextColor',
+  'defaultTextSize', 'defaultTextRotation',
+];
+
+export type ChordSettingsPatch = Partial<Pick<Settings, typeof CHORD_SETTING_KEYS[number]>>;
+
+/** Extract a full per-chord patch snapshot from a merged Settings object. */
+export function chordPatchFrom(s: Settings): ChordSettingsPatch {
+  const out: Record<string, unknown> = {};
+  for (const k of CHORD_SETTING_KEYS) out[k] = structuredClone(s[k]);
+  return out as ChordSettingsPatch;
+}
+
+/** Merge order: defaults first, patch last (patch wins). */
+export function mergeChordSettings(base: Settings, patch?: Partial<Settings>): Settings {
+  if (!patch) return base;
+  return { ...base, ...structuredClone(patch) };
+}
+
+/** Normalized chord id accessor — old saved data may lack `id`. */
+export function chordId(c: ChordDoc): string {
+  if (!c.id) c.id = uid('chord');
+  return c.id;
+}
+
+/** Canvas position + size of one chord on the page (page coords, unscaled units). */
+export interface ChordPlacement { x: number; y: number; w: number; h: number; scale: number }
+
+export type PageSizeName = 'letter' | 'legal' | 'a4' | 'a3' | 'custom';
+
+export interface PageConfig {
+  size: PageSizeName;
+  landscape: boolean;
+  customW: number;   // px (used when size === 'custom')
+  customH: number;
+  showGrid: boolean;
+  snap: boolean;
+  gridSize: number;  // px
+}
+
+/** A page is a document too — it needs its own stable id (multi-page support). */
+export interface PageDoc {
+  id: string;                                 // stable page identity
+  name: string;
+  config: PageConfig;
+  chords: ChordDoc[];
+  placements: Record<string, ChordPlacement>; // keyed by chord id
+  selected: string | null;                    // currently selected chord id
+}
+
+/** true ⇒ the placement box sits fully inside the page bounds. */
+export function fitsPage(pl: ChordPlacement, page: { w: number; h: number }): boolean {
+  return pl.x >= 0 && pl.y >= 0 && pl.x + pl.w <= page.w && pl.y + pl.h <= page.h;
+}
+
+export const PAGE_SIZES: Record<Exclude<PageSizeName, 'custom'>, { label: string; w: number; h: number }> = {
+  letter: { label: 'Letter 8.5\u00d711"', w: 816, h: 1056 },
+  legal: { label: 'Legal 8.5\u00d714"', w: 816, h: 1344 },
+  a4: { label: 'A4 210\u00d7297mm', w: 794, h: 1123 },
+  a3: { label: 'A3 297\u00d7420mm', w: 1123, h: 1587 },
+};
+
+export function pageSizePx(cfg: PageConfig): { w: number; h: number } {
+  const base = cfg.size === 'custom'
+    ? { w: Math.max(200, Math.round(cfg.customW)), h: Math.max(200, Math.round(cfg.customH)) }
+    : (() => { const p = PAGE_SIZES[cfg.size]; return { w: p.w, h: p.h }; })();
+  return cfg.landscape ? { w: base.h, h: base.w } : base;
+}
+
+/** Default placement box for a chord (its natural canvas size, or a fallback). */
+export function defaultPlacement(natural: { w: number; h: number } | null): ChordPlacement {
+  const w = natural?.w ?? 320, h = natural?.h ?? 420;
+  return { x: 60, y: 60, w, h, scale: 1 };
+}
+
+/** Snap a value to the grid when snapping is enabled. */
+export function snapVal(v: number, cfg: PageConfig): number {
+  if (!cfg.snap || !Number.isFinite(v)) return v;
+  const g = Math.max(2, cfg.gridSize || 10);
+  return Math.round(v / g) * g;
 }
 
 export function isStandardShape(name: string, s: Settings): boolean {
