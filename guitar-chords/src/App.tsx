@@ -96,7 +96,7 @@ export default function App() {
   useEffect(() => { localStorage.setItem('gcd.inlineEdit', inlineEdit ? '1' : '0'); }, [inlineEdit]);
   const [dragging, setDragging] = useState(false);       // text-box drag inside a chord
   const [pageDrag, setPageDrag] = useState(false);       // chord box drag on the page
-  const dragRef = useRef<{ dx: number; dy: number } | null>(null);
+  const dragRef = useRef<{ id: string; dx: number; dy: number } | null>(null);
   const pageDragRef = useRef<{ id: string; sx: number; sy: number; ox: number; oy: number } | null>(null);
   const boardWrapRef = useRef<HTMLDivElement>(null);
   const printRef = useRef<HTMLDivElement>(null);
@@ -393,14 +393,51 @@ export default function App() {
   };
 
   // ---------- text-box dragging inside a chord (external editor AND inline) ----------
-  /** Grab a text box of chord `id` (must be the selected chord). `local` is in
-   *  the chord's own canvas space. Returns true when a drag started. */
+  /** The chord doc used for text drags — on an INLINE page click we select the
+   *  clicked chord and call this in the SAME event, so `entry`/`size` from the
+   *  last render still describe the OLD chord. Read the clicked chord's doc and
+   *  its own canvas size directly from the page instead. */
+  const textDragCtx = (id: string): { doc: ChordDoc; w: number; h: number } | null => {
+    if (!page) return null;
+    const doc = id === selectedId && entry ? entry : page.chords.find(c => c.id === id) ?? null;
+    if (!doc) return null;
+    const es = mergeChordSettings(settings, doc.settings);
+    const sz = id === selectedId ? size : canvasSize(es);
+    return { doc, w: sz.w, h: sz.h };
+  };
+
+  /** Pick a text item at a point in chord `id`'s canvas space. */
+  const pickItemAt = (id: string, x: number, y: number): Sel => {
+    const ctx = textDragCtx(id);
+    if (!ctx) return null;
+    const es = mergeChordSettings(settings, ctx.doc.settings);
+    let best: { d: number; sel: Sel } = { d: 26, sel: null };
+    for (const d of ctx.doc.dots) {
+      const c = cellCenter(es, d.string, d.fret - es.startFret);
+      const dist = Math.hypot(c.x - x, c.y - y);
+      if (dist < best.d) best = { d: dist, sel: { kind: 'dot', id: d.id } };
+    }
+    for (const t of ctx.doc.texts) {
+      const dist = Math.hypot(t.x * ctx.w - x, t.y * ctx.h - y);
+      if (dist < best.d) best = { d: dist, sel: { kind: 'text', id: t.id } };
+    }
+    for (const f of ctx.doc.fingerings) {
+      const p = fingeringPos(es, f.string);
+      const dist = Math.hypot(p.x - x, p.y - y);
+      if (dist < best.d) best = { d: dist, sel: { kind: 'fing', id: f.id } };
+    }
+    return best.sel;
+  };
+
+  /** Grab a text box of chord `id`. `local` is in that chord's own canvas space.
+   *  Returns true when a drag started. */
   const beginTextDrag = (id: string, local: { x: number; y: number }): boolean => {
-    if (!entry || id !== selectedId) return false;
-    const s = pickItem(local.x, local.y);
+    const ctx = textDragCtx(id);
+    if (!ctx) return false;
+    const s = pickItemAt(id, local.x, local.y);
     if (s && s.kind === 'text') {
-      const t = entry.texts.find(tt => tt.id === s.id)!;
-      dragRef.current = { dx: local.x - t.x * size.w, dy: local.y - t.y * size.h };
+      const t = ctx.doc.texts.find(tt => tt.id === s.id)!;
+      dragRef.current = { id, dx: local.x - t.x * ctx.w, dy: local.y - t.y * ctx.h };
       beginDragHistory();          // ONE snapshot for the whole drag gesture
       setDragging(true);
       setSel(s);
@@ -410,11 +447,14 @@ export default function App() {
   };
 
   const applyTextDrag = (local: { x: number; y: number }) => {
-    if (!dragRef.current || !sel) return;
-    const nx = (local.x - dragRef.current.dx) / size.w;
-    const ny = (local.y - dragRef.current.dy) / size.h;
+    const ref = dragRef.current;
+    if (!ref || !sel) return;
+    const ctx = textDragCtx(ref.id);
+    if (!ctx) return;
+    const nx = (local.x - ref.dx) / ctx.w;
+    const ny = (local.y - ref.dy) / ctx.h;
     setPageNoHist(p => {           // intermediate moves never touch history
-      const i = p.chords.findIndex(c => c.id === selectedId);
+      const i = p.chords.findIndex(c => c.id === ref.id);
       if (i < 0) return p;
       p.chords[i].texts = p.chords[i].texts.map(t => (t.id === sel.id ? { ...t, x: nx, y: ny } : t));
       return p;
