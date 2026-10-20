@@ -8,6 +8,7 @@
 import type { ChordColor, ChordDoc, Dot, Settings } from './types';
 import { col, uid } from './types';
 import { isHiddenRel, nutShown } from './types';
+import { pitchAtRel } from './music';
 import {
   boardAcross, canvasSize, cellCenter, farBand, fingeringPos,
   fretLength, fretPositions, halfWidthAlong, nutZoneDepth,
@@ -257,7 +258,8 @@ function renderFingerings(doc: ChordDoc, s: Settings): string {
 }
 
 export function renderDot(d: Dot, s: Settings, customs: Record<string,string> = {}): string {
-  const c = cellCenter(s, d.string, relOf(s, d.fret));
+  const rel = relOf(s, d.fret);
+  const c = cellCenter(s, d.string, rel);
   const size = s.baseDotSize * (d.textSize != null ? Math.max(0.3, d.textSize) : 1);
   const colorIdx = ((d.colorIdx % s.colors.length) + s.colors.length) % s.colors.length;
   const base = s.colors[colorIdx] ?? s.shapeDefaultColor;
@@ -268,15 +270,22 @@ export function renderDot(d: Dot, s: Settings, customs: Record<string,string> = 
   const glyphScale = (size * s.shapeScale) / 100;
   const rot = d.rotation || 0;
 
+  // NOTE-VISIBLE mode: automatically show the pitch of the dot position, computed
+  // from the string tuning and the offset into the string (relative fret, which
+  // uses startFret). A manually typed text always wins over the auto pitch.
+  const label = d.text.trim()
+    ? d.text
+    : (s.noteVisible ? pitchAtRel(s.tuning, d.string, rel, !!s.preferFlats) : '');
+
   const out: string[] = [];
   out.push(`<g transform="translate(${c.x.toFixed(1)},${c.y.toFixed(1)}) rotate(${rot})">`);
   out.push(`<g transform="scale(${glyphScale.toFixed(4)}) translate(-50,-50)" style="color:${col(fillColor)}">`);
   out.push(shapeInner(shapeName, customs));
   out.push('</g>');
-  if (d.text) {
-    const tc = d.textColor ?? { hex: '#ffffff', alpha: 1 };
+  if (label) {
+    const tc = d.textColor ?? s.dotTextColor ?? { hex: '#ffffff', alpha: 1 };
     const fs = size * 0.55;
-    out.push(`<text font-family="${esc(d.font ?? s.defaultTextFont)}" font-size="${fs.toFixed(1)}" fill="${col(tc)}" text-anchor="middle" dominant-baseline="central" font-weight="bold">${esc(d.text)}</text>`);
+    out.push(`<text font-family="${esc(d.font ?? s.defaultTextFont)}" font-size="${fs.toFixed(1)}" fill="${col(tc)}" text-anchor="middle" dominant-baseline="central" font-weight="bold">${esc(label)}</text>`);
   }
   out.push('</g>');
   return out.join('');

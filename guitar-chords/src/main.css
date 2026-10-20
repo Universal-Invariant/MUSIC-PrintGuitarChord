@@ -139,3 +139,12 @@ body { font-family: 'Segoe UI', Arial, sans-serif; background: #eceff3; color: #
 /* margins editor */
 .margins-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 10px; margin: 2px 0 6px; }
 .row.compact > span:first-child { width: 56px; text-transform: capitalize; }
+
+/* Quick setting overrides in the toolbar (starting fret / frets displayed) */
+.quick-ovr { display: inline-flex; align-items: center; }
+.quick-ovr label {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 12px; color: #444; white-space: nowrap;
+  background: #fff; border: 1px solid #d7d2e0; border-radius: 8px; padding: 3px 8px;
+}
+.quick-ovr input[type="range"] { width: 90px; accent-color: #7a5af8; }

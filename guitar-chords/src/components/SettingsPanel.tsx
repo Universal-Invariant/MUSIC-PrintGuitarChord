@@ -1,9 +1,10 @@
 import { useState } from 'react';
 import type { ChordColor, Margins, Settings } from '../lib/types';
-import { nutShown } from '../lib/types';
+import { MIN_NUM_FRETS, clampNumFrets, nutShown } from '../lib/types';
 import { BASKET_COLORS, DEFAULT_COLORS, DEFAULT_SETTINGS } from '../lib/storage';
 import { STANDARD_SHAPES, sanitizeSvgInput } from '../lib/shapes';
 import { FONT_OPTIONS } from '../lib/render';
+import { midiToName, TUNING_PRESETS } from '../lib/music';
 import ColorPicker from './ColorPicker';
 
 interface Props {
@@ -82,9 +83,10 @@ export default function SettingsPanel({ settings, onChange, customs, onCustomsCh
     <div className="settings">
       <Section title="Fretboard geometry">
         <label className="row"><span>Frets displayed</span>
-          <input type="number" min={1} max={27} value={s.numFrets} onChange={e => set({ numFrets: Math.max(1, Math.min(27, Number(e.target.value))) })} /></label>
+          <input type="number" min={MIN_NUM_FRETS} max={27} value={s.numFrets} onChange={e => set({ numFrets: clampNumFrets(Number(e.target.value)) })} /></label>
+        <div className="mini-note">At least {MIN_NUM_FRETS} frets are always displayed.</div>
         <label className="row"><span>Starting fret</span>
-          <input type="number" min={1} max={24} value={s.startFret} onChange={e => set({ startFret: Math.max(1, Number(e.target.value)) })} /></label>
+          <input type="number" min={1} max={24} value={s.startFret} onChange={e => set({ startFret: Math.max(1, Math.min(24, Math.round(Number(e.target.value) || 1))) })} /></label>
         <div className="mini-note">The nut is shown only when the starting fret is 1; higher starting frets hide it automatically.</div>
         <label className="row"><span>Orientation</span>
           <select value={s.orientation} onChange={e => set({ orientation: e.target.value as Settings['orientation'] })}>
@@ -137,7 +139,13 @@ export default function SettingsPanel({ settings, onChange, customs, onCustomsCh
         <div className="mini-note">Fret-wire stroke used for every fret line — small values look like thin/vintage frets, larger ones like medium/jumbo frets.</div>
         <label className="row"><span>Fretboard taper</span>
           <input type="range" min={0} max={100} value={Math.round(s.boardTaper * 100)} onChange={e => set({ boardTaper: Number(e.target.value) / 100 })} /><b style={{ fontSize: 11 }}>{Math.round(s.boardTaper * 100)}%</b></label>
-        <div className="mini-note">Taper follows real guitar geometry: the nut end is the NARROWEST point of the board and it gets WIDER toward the higher frets (never narrower). 0% ⇒ constant width; higher ⇒ wider trapezoid at the high-fret end. It follows absolute fret positions, so it stays consistent when you change the starting fret or flip the board.</div>
+        <div className="mini-note">Taper follows real guitar geometry: the nut end is the NARROWEST point of the board and it gets WIDER toward the higher frets (never narrower). 0% ⇒ constant width; higher ⇒ wider trapezoid at the high-fret end.</div>
+        <label className="row"><span>Taper reference</span>
+          <select value={s.taperMode} onChange={e => set({ taperMode: e.target.value as Settings['taperMode'] })}>
+            <option value="relative">Relative — same shape for any starting fret</option>
+            <option value="absolute">Absolute — follows real fret numbers</option>
+          </select></label>
+        <div className="mini-note">Relative mode maps the taper across exactly the displayed slots, so changing the starting fret keeps the trapezoid IDENTICAL. Absolute mode uses the real fret positions (fret 12 is always the widest), so the shape changes with the starting fret — like looking at different parts of a real neck.</div>
         <label className="row"><span>Fret numbers</span>
           <select value={s.fretLabels} onChange={e => set({ fretLabels: e.target.value as Settings['fretLabels'] })}>
             <option value="all">Show all</option>
@@ -202,6 +210,33 @@ export default function SettingsPanel({ settings, onChange, customs, onCustomsCh
           ))}
         </div>
         <button className="btn small" onClick={() => set({ defaultColors: DEFAULT_COLORS.map(x => ({ ...x })) })}>Reset to defaults</button>
+      </Section>
+
+      <Section title="Note pitches & tuning">
+        <label className="row check"><input type="checkbox" checked={s.noteVisible} onChange={e => set({ noteVisible: e.target.checked })} /><span>Note visible mode — auto-label every dot with its pitch</span></label>
+        <div className="mini-note">When enabled, each note dot automatically shows the pitch computed from the string tuning and its offset into the string (relative fret, based on the starting fret) — no manual typing needed. A manually typed dot text always overrides the automatic pitch.</div>
+        <label className="row"><span>Tuning preset</span>
+          <select value="" onChange={e => {
+            const p = TUNING_PRESETS.find(x => x.name === e.target.value);
+            if (p) set({ tuning: [...p.values] });
+          }}>
+            <option value="">Choose a preset…</option>
+            {TUNING_PRESETS.map(p => <option key={p.name} value={p.name}>{p.name}</option>)}
+          </select></label>
+        <div className="margins-grid">
+          {[0, 1, 2, 3, 4, 5].map(i => (
+            <label key={i} className="row compact"><span>{['1-e', '2-B', '3-G', '4-D', '5-A', '6-E'][i]} · {midiToName(s.tuning[i] ?? 60, s.preferFlats)}</span>
+              <input type="number" min={24} max={96} value={s.tuning[i] ?? 60}
+                onChange={e => {
+                  const t = [...s.tuning];
+                  t[i] = Math.max(24, Math.min(96, Math.round(Number(e.target.value) || t[i] || 60)));
+                  set({ tuning: t });
+                }} /></label>
+          ))}
+        </div>
+        <div className="mini-note">Open-string pitches as MIDI numbers (E2 = 40 … e4 = 64 for standard tuning), listed high e → low E.</div>
+        <label className="row check"><input type="checkbox" checked={s.preferFlats} onChange={e => set({ preferFlats: e.target.checked })} /><span>Spell pitches with flats (Bb) instead of sharps (A#)</span></label>
+        <ColorPicker label="Pitch label color" compact value={s.dotTextColor} onChange={c => setColor('dotTextColor', c)} />
       </Section>
 
       <Section title="Note dots — shapes">

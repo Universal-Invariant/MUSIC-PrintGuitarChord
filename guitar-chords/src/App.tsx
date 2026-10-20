@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ChordDoc, Dot, Settings } from './lib/types';
-import { uid } from './lib/types';
+import { MIN_NUM_FRETS, clampNumFrets, clampStartFret, uid } from './lib/types';
 import { cellCenter, hitTest, makeDot, renderSvg } from './lib/render';
 import { canvasSize, fingeringPos } from './lib/geometry';
 import { cycleShapeIndices, cycleColorIndices } from './lib/render';
@@ -24,6 +24,8 @@ export default function App() {
   const [sel, setSel] = useState<Sel>(null);
   const [editing, setEditing] = useState<Sel>(null);
   const [showSettings, setShowSettings] = useState(false);
+  // NOTE-VISIBLE quick toggle — flips pitch labels on/off without touching any other setting
+  const toggleNoteVisible = () => setSettings(prev => ({ ...prev, noteVisible: !prev.noteVisible }));
   const [showLib, setShowLib] = useState(false);
   const [dragging, setDragging] = useState(false);
   const dragRef = useRef<{ dx: number; dy: number } | null>(null);
@@ -315,7 +317,18 @@ export default function App() {
           <button className="btn" onClick={undo} title="Undo (Ctrl+Z)">↩</button>
           <button className="btn" onClick={redo} title="Redo (Ctrl+Shift+Z)">↪</button>
           <button className="btn" onClick={() => mutate(d => ({ ...emptyChord(), name: d.name }))} title="Clear board">🗑 Clear</button>
-          <button className="btn" onClick={suggestNames} title="Fill dots with suggested note names">♪ Note names</button>
+          <button className={`btn ${settings.noteVisible ? 'active' : ''}`} onClick={toggleNoteVisible}
+            title="Note visible mode: auto-label every dot with its pitch (from the tuning + fret offset). On/off without changing other settings.">♪ Note visible</button>
+          <span className="quick-ovr" title="Quick override of the starting fret (overrides the Settings value)">
+            <label>Fret {settings.startFret}<input type="range" min={1} max={24} step={1}
+              value={settings.startFret}
+              onChange={e => setSettings(s => ({ ...s, startFret: clampStartFret(Number(e.target.value)) }))} /></label>
+          </span>
+          <span className="quick-ovr" title={`Quick override of the number of frets displayed (min ${MIN_NUM_FRETS})`}>
+            <label>Show {settings.numFrets}<input type="range" min={MIN_NUM_FRETS} max={15} step={1}
+              value={Math.min(15, Math.max(MIN_NUM_FRETS, settings.numFrets))}
+              onChange={e => setSettings(s => ({ ...s, numFrets: clampNumFrets(Number(e.target.value)) }))} /></label>
+          </span>
           <button className="btn" onClick={() => setShowLib(v => !v)}>📚 Library</button>
           <button className="btn" onClick={() => setShowSettings(v => !v)}>⚙ Settings</button>
         </div>

@@ -6,6 +6,20 @@ const FLATS = ['C', 'Db', 'D', 'Eb', 'E', 'F', 'Gb', 'G', 'Ab', 'A', 'Bb', 'B'];
 /** Open-string MIDI numbers for standard tuning (index 0 = low E .. 5 = high e). */
 export const STANDARD_TUNING = [40, 45, 50, 55, 59, 64];
 
+/** Same list in DOT-model order (index 0 = high e .. 5 = low E) — what Settings.tuning stores. */
+export const TUNING_HIGH_TO_LOW = [...STANDARD_TUNING].reverse();
+
+/** Common tunings, stored in dot-model order (high e → low E), with display names. */
+export const TUNING_PRESETS: { name: string; values: number[] }[] = [
+  { name: 'Standard EADGBE', values: TUNING_HIGH_TO_LOW },
+  { name: 'Drop D', values: [64, 59, 55, 50, 45, 38] },
+  { name: 'Half step down (Eb)', values: [63, 58, 54, 49, 44, 39] },
+  { name: 'Whole step down (D)', values: [62, 57, 53, 48, 43, 38] },
+  { name: 'Open G (DGDGBD)', values: [62, 55, 50, 55, 50, 55] },
+  { name: 'DADGAD', values: [62, 57, 50, 55, 45, 38] },
+  { name: 'Open D (FADFAD)', values: [65, 57, 50, 57, 53, 50] },
+];
+
 export function midiToName(midi: number, preferFlat = false): string {
   const pc = ((midi % 12) + 12) % 12;
   return (preferFlat ? FLATS : NOTE_NAMES)[pc];
@@ -64,4 +78,22 @@ export function suggestNoteNames(
     out.set(`${d.string}:${d.fret}`, midiToName(midis[i], useFlats));
   });
   return out;
+}
+
+/**
+ * Pitch of a dot computed from the tuning and its position on the string.
+ * The offset into the string is the RELATIVE fret (absFret − startFret), so a
+ * dot placed on the first visible slot sounds one semitone above the open
+ * string no matter which starting fret is selected. rel < 0 (open zone) ⇒ 0.
+ * `tuning` is in DOT-model order (index 0 = high e .. 5 = low E).
+ */
+export function pitchAtRel(tuning: number[], string: number, rel: number, preferFlats = false): string {
+  const open = tuning[string] ?? tuning[0] ?? 64;
+  const fret = Math.max(0, rel); // open dots (rel === -1) sound at the open pitch
+  return midiToName(open + fret, preferFlats);
+}
+
+/** Back-compat alias — absolute-fret spelling kept for older call sites. */
+export function pitchAtFret(tuning: number[], string: number, absFret: number, preferFlats = false): string {
+  return pitchAtRel(tuning, string, absFret, preferFlats);
 }
