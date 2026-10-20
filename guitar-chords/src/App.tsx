@@ -2,12 +2,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ChordDoc, ChordPlacement, Dot, PageConfig, PageDoc, Settings } from './lib/types';
 import {
   MIN_NUM_FRETS, chordPatchFrom, clampNumFrets, clampStartFret, fitsPage,
-  mergeChordSettings, pageSizePx, placementsOverlap, snapVal, uid,
+  mergeChordSettings, pageSizePx, placementsOverlap, resolveCollision, snapVal, uid,
 } from './lib/types';
-import { cellCenter, composePage, hitTest, makeDot, renderSvg, svgInner } from './lib/render';
-import { canvasSize, cellCenter, fingeringPos, fretPositions, hitTest, nutZoneDepth, project, stringLayout, unproject } from './lib/geometry';
-import { cycleShapeIndices, cycleColorIndices } from './lib/render';
-import { NUM_STRINGS } from './lib/geometry';
+import { composePage, cycleColorIndices, cycleShapeIndices, makeDot, renderSvg, svgInner } from './lib/render';
+import {
+  NUM_STRINGS, canvasSize, cellCenter, fingeringPos, fretPositions, hitTest,
+  nutZoneDepth, project, stringLayout, unproject,
+} from './lib/geometry';
 import {
   chordFromLibrary, duplicatePage, emptyChord, emptyPage, exportRaster, exportSvg,
   loadActivePageId, loadChordList, loadCustomShapes, loadPages, loadSettings, packRows,
@@ -60,6 +61,20 @@ export default function App() {
   const setPage = useCallback((fn: (p: PageDoc) => PageDoc) => {
     setPages(list => list.map((p, i) => (i === pageIdx ? fn(structuredClone(p)) : p)));
   }, [pageIdx]);
+
+  /** Post-process a page so NO chord box overlaps another. Chords that do are
+   *  nudged to the nearest free spot by resolveCollision(). Applied after every
+   *  structural mutation (add / scale / refit / auto-layout / import). */
+  const ensureNoOverlaps = (p: PageDoc): PageDoc => {
+    const ps = pageSizePx(p.config);
+    for (const id of Object.keys(p.placements)) {
+      const others = Object.entries(p.placements)
+        .filter(([k]) => k !== id)
+        .map(([, v]) => v);
+      p.placements[id] = resolveCollision(p.placements[id], others, ps);
+    }
+    return p;
+  };
 
   const selectedId = page?.selected ?? null;
   const selIdx = page?.chords.findIndex(c => c.id === selectedId) ?? -1;
@@ -117,18 +132,35 @@ export default function App() {
   useEffect(() => { hist.onChange(() => setHistTick(t => t + 1)); }, [hist]);
   void histTick; // button disabled states re-render on every history change
 
+  /** After an undo/restore, drop stale selection so a brand-new chord can be
+   *  added immediately (a dangling `selected` id used to make addChordToPage
+   *  silently do nothing — "the new chord never appears"). */
+  useEffect(() => {
+    if (!page) return;
+    if (page.selected && !page.chords.some(c => c.id === page.selected)) {
+      setPages(list => list.map((p, i) => (i === pageIdx ? { ...p, selected: null } : p)));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pages]);
+
   /** Record the CURRENT page-list state before a mutation (clears redo).
    *  Suppressed while a continuous drag gesture is in progress so an entire
    *  drag coalesces into the single snapshot taken at gesture start. */
   const pushHistory = useCallback(() => {
     if (histPausedRef.current) return;
     hist.commit('pages', jsonSnap(pagesRef.current));
+    // library changes ride along with the page snapshot so a single Ctrl+Z
+    // reverts BOTH sides of e.g. "save chord to library" in one step
+    if (libDirtyRef.current) {
+      libDirtyRef.current = false;
+      hist.commit('chords', jsonSnap(chordsRef.current));
+    }
   }, [hist]);
 
-  /** Record the CURRENT library state before a mutation. */
-  const pushLibHistory = useCallback(() => {
-    hist.commit('chords', jsonSnap(chordsRef.current));
-  }, [hist]);
+  /** Record the CURRENT library state before a mutation. Deferred into the
+   *  next pushHistory() call so page + library mutate as ONE undo step. */
+  const libDirtyRef = useRef(false);
+  const pushLibHistory = useCallback(() => { libDirtyRef.current = true; }, []);
 
   /** Mutate the selected chord doc (history-aware). */
   const mutate = useCallback((fn: (d: ChordDoc) => ChordDoc) => {

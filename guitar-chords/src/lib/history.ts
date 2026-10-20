@@ -68,20 +68,31 @@ export class HistoryManager {
   undoCount(): number { return [...this.slices.values()].reduce((n, h) => n + h.undo.length, 0); }
   redoCount(): number { return [...this.slices.values()].reduce((n, h) => n + h.redo.length, 0); }
 
+  /** Undo ONE step across all slices: every slice that has an undo entry is
+   *  restored together, so page + library changes recorded in the same action
+   *  revert as a single step. */
   private pop(lists: 'undo' | 'redo') {
     const other = lists === 'undo' ? 'redo' : 'undo';
-    for (const [name, h] of this.slices) {
+    // pass 1: stash current state of every participating slice
+    let acted = false;
+    for (const h of this.slices.values()) {
       if (!h.undo.length && !h.redo.length) continue;
-      if (h[lists].length) {
-        const acc = h.acc;
-        const snap = h[lists].pop()!;
-        h[other].push(acc ? acc.serialize(undefined as never) : null);
-        acc?.restore(snap);
-        this.notify?.();
-        return true;
-      }
+      if (!h[lists].length) continue;
+      acted = true;
+      const acc = h.acc;
+      h[other].push(acc ? acc.serialize(undefined as never) : null);
+      if (h[other].length > HISTORY_LIMIT) h[other].shift();
     }
-    return false;
+    if (!acted) return false;
+    // pass 2: restore the recorded snapshots (all slices land in the SAME tick)
+    for (const h of this.slices.values()) {
+      if (!h.undo.length && !h.redo.length) continue;
+      if (!h[lists].length) { h[other].pop(); continue; }  // roll back its stash
+      const snap = h[lists].pop()!;
+      h.acc?.restore(snap);
+    }
+    this.notify?.();
+    return true;
   }
 
   undoAll(): boolean { return this.pop('undo'); }
