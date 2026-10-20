@@ -27,7 +27,6 @@ import type { Settings } from './types';
 import { nutShown } from './types';
 
 export const NUM_STRINGS = 6;
-const TAPER_PAD = 30;      // extra length beyond the last fret (where sides converge a bit more)
 export const FING_BAND = 46;   // reserved band for fingering labels (opposite the nut)
 const OUT_LABEL_PAD = 26;  // room beside the board for fret numbers / string labels
 export const OPEN_ZONE = 30;   // floating zone before the first fret line (open dots / pitches)
@@ -81,6 +80,7 @@ export function fretLength(s: Settings): number {
  * the width GROWS toward higher frets (it never shrinks).
  * With taper t, the width at fret f is  W(f) = W0 · (1 + t·(2^(f/12) − 1)).
  * taper 0 ⇒ constant width everywhere; higher ⇒ wider toward the high frets.
+ * Only used when s.taperMode === 'absolute'.
  */
 export function halfWidthAtFret(s: Settings, absFret: number): number {
   const hwMin = boardAcross(s) / 2; // narrowest point = the nut / 0-fret end
@@ -88,16 +88,31 @@ export function halfWidthAtFret(s: Settings, absFret: number): number {
   return hwMin * factor;
 }
 
+/**
+ * FAN DEGREE (2^(x/12) − 1 growth factor) at a logical along-axis distance t,
+ * where t = 0 sits at the starting-fret line and grows toward higher frets.
+ *  • 'absolute' mode: real fret numbers are used — fan(x) with x = startFret +
+ *    fractional slot. Changing the starting fret CHANGES the taper shape.
+ *  • 'relative' mode: the whole taper spans exactly the displayed range —
+ *    slots map linearly onto frets 0..numFrets. The trapezoid shape stays
+ *    IDENTICAL no matter which starting fret is chosen.
+ */
+export function fanDegreeAtAlong(s: Settings, t: number): number {
+  const flen = Math.max(1, fretLength(s));
+  if (s.taperMode === 'relative') {
+    const frac = Math.max(0, Math.min(s.numFrets, (t / flen) * s.numFrets));
+    return Math.pow(2, frac / 12) - 1;
+  }
+  // absolute: estimate the real fret at distance t from the average slot width
+  const avgSlot = flen / Math.max(1, s.numFrets);
+  const x = Math.max(0, s.startFret) + t / avgSlot;
+  return Math.pow(2, x / 12) - 1;
+}
+
 /** Half-width at a point along the fret axis (t is 0 at the nut line, grows toward high frets). */
 export function halfWidthAlong(s: Settings, t: number): number {
-  const flen = fretLength(s);
-  const L = flen + TAPER_PAD;
-  const tc = Math.max(0, Math.min(L, t));
-  const fStart = Math.max(0, s.startFret);
-  const fEnd = fStart + s.numFrets + (TAPER_PAD / Math.max(1, flen)) * s.numFrets;
-  const hw0 = halfWidthAtFret(s, fStart);
-  const hwE = halfWidthAtFret(s, fEnd);
-  return hw0 + (hwE - hw0) * (tc / L);
+  const hwMin = boardAcross(s) / 2;
+  return hwMin * (1 + s.boardTaper * fanDegreeAtAlong(s, t));
 }
 
 /** true ⇒ string order reversed (low E first) — "left-handed" string layout. */

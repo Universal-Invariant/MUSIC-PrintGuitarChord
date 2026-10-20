@@ -3,6 +3,7 @@
 import type { ChordColor, ChordDoc, Settings } from './types';
 import { BLACK, WHITE } from './types';
 import { STANDARD_SHAPES } from './shapes';
+import { TUNING_HIGH_TO_LOW } from './music';
 
 export const DEFAULT_COLORS: ChordColor[] = [
   { hex: '#e6194b', alpha: 1 }, // red
@@ -45,6 +46,7 @@ export const DEFAULT_SETTINGS: Settings = {
   nutWidth: 7,
   fretThickness: 2.5,
   reverseStrings: false,
+  taperMode: 'relative',
   fretLabels: 'all',
   fretLabelList: '',
   openSide: 'nut',
@@ -54,6 +56,10 @@ export const DEFAULT_SETTINGS: Settings = {
   firstFretSize: 52,
   lastFretSize: 30,
   showDots: true,
+  noteVisible: false,
+  dotTextColor: { hex: '#ffffff', alpha: 1 },
+  tuning: [...TUNING_HIGH_TO_LOW],
+  preferFlats: false,
   dotMarkerColor: { hex: '#c8bcd0', alpha: 0.9 },
   bgFill: WHITE,
   fretColor: { hex: '#4a4a4a', alpha: 1 },
@@ -120,6 +126,18 @@ export function loadSettings(): Settings {
     if (typeof merged.flipAlong !== 'boolean') merged.flipAlong = false;
     if (typeof merged.flipAcross !== 'boolean') merged.flipAcross = false;
     if (typeof merged.reverseStrings !== 'boolean') merged.reverseStrings = false;
+    if (merged.taperMode !== 'absolute' && merged.taperMode !== 'relative') merged.taperMode = DEFAULT_SETTINGS.taperMode;
+    if (typeof merged.noteVisible !== 'boolean') merged.noteVisible = false;
+    if (typeof merged.preferFlats !== 'boolean') merged.preferFlats = false;
+    // tuning: 6 MIDI numbers, dot-model order (index 0 = high e .. 5 = low E)
+    if (!Array.isArray(merged.tuning) || merged.tuning.length !== 6 || merged.tuning.some(v => typeof v !== 'number' || !Number.isFinite(v))) {
+      merged.tuning = [...TUNING_HIGH_TO_LOW];
+    } else {
+      merged.tuning = merged.tuning.map(v => Math.max(12, Math.min(108, Math.round(v))));
+    }
+    if (!merged.dotTextColor || typeof merged.dotTextColor.hex !== 'string') merged.dotTextColor = { ...DEFAULT_SETTINGS.dotTextColor };
+    // frets displayed is ALWAYS at least 3 — quick overrides and settings share this floor
+    if (typeof merged.numFrets === 'number') merged.numFrets = Math.max(3, Math.min(27, Math.round(merged.numFrets)));
     if (typeof merged.fretThickness !== 'number' || !Number.isFinite(merged.fretThickness)) merged.fretThickness = DEFAULT_SETTINGS.fretThickness;
     merged.fretThickness = Math.max(0.5, Math.min(12, merged.fretThickness));
     // real guitar geometry: the last slot can never be wider than the first one

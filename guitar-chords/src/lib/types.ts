@@ -87,8 +87,13 @@ export interface Settings {
   boardTaper: number;        // 0..1 — REAL guitar fretboard fan: the NUT end is the
                              // NARROWEST point of the board and the width GROWS toward
                              // the higher frets (it never shrinks). 0 ⇒ constant width;
-                             // higher ⇒ wider at the high-fret end. Follows ABSOLUTE
-                             // fret positions, so it survives flips and startFret changes.
+                             // higher ⇒ wider at the high-fret end.
+  taperMode: 'absolute' | 'relative';
+                             // 'absolute' ⇒ taper follows real fret numbers (fret 12 is
+                             // always widest) and changes with startFret;
+                             // 'relative' ⇒ taper spans exactly the displayed slots, so
+                             // the shape stays IDENTICAL no matter which starting fret
+                             // is chosen.
   fretLabels: FretLabelMode; // show all / none / a custom set of fret numbers
   fretLabelList: string;     // comma/range list e.g. "3-5, 8, 12" (used when fretLabels='custom')
   openSide: 'nut' | 'far';   // which END the string open-pitches (e B G D A E) sit at
@@ -97,6 +102,12 @@ export interface Settings {
   firstFretSize: number;     // px (used when logarithmic)
   lastFretSize: number;      // px (used when logarithmic)
   showDots: boolean;         // inlays
+  noteVisible: boolean;      // true ⇒ every note dot automatically shows its pitch
+                             // (computed from the string tuning + absolute fret);
+                             // a manually typed dot text still wins over the pitch.
+  dotTextColor: ChordColor;  // color used for those automatic pitch labels
+  tuning: number[];          // open-string MIDI numbers, model order: index 0 = high e .. 5 = low E
+  preferFlats: boolean;      // spell auto pitches with flats instead of sharps
   dotMarkerColor: ChordColor;
   bgFill: ChordColor;
   fretColor: ChordColor;
@@ -163,6 +174,19 @@ export function isHiddenRel(s: Settings, rel: number): boolean {
  *  higher starting frets sit mid-neck, where a real guitar has no nut. */
 export function nutShown(s: Settings): boolean {
   return s.startFret === 1;
+}
+
+/** Clamp helpers for the quick-override controls (frets displayed ≥ 3 always). */
+export const MIN_NUM_FRETS = 3;
+export function clampNumFrets(v: number): number {
+  if (!Number.isFinite(v)) return DEFAULT_NUM_FRETS_CLAMP;
+  return Math.max(MIN_NUM_FRETS, Math.min(27, Math.round(v)));
+}
+const DEFAULT_NUM_FRETS_CLAMP = 5;
+
+export function clampStartFret(v: number): number {
+  if (!Number.isFinite(v)) return 1;
+  return Math.max(1, Math.min(24, Math.round(v)));
 }
 
 export function isStandardShape(name: string, s: Settings): boolean {
