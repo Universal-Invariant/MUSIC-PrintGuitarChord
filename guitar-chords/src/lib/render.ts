@@ -85,24 +85,26 @@ export function renderSvg(doc: ChordDoc, settings: Settings, opts: RenderOpts & 
   parts.push(renderBoardPanel(s, flen, pad, P));
 
   // ----- fret lines (including the 0-fret line which the nut sits on) -----
+  // stroke width = user "fret thickness" setting (thin vintage vs jumbo frets)
+  const fretW = Math.max(0.5, s.fretThickness ?? 2);
   for (let i = 0; i <= s.numFrets; i++) {
     const t = positions[i];
     const hw = halfWidthAlong(s, t) + pad * 0.4;
     const p1 = P(t, -hw), p2 = P(t, hw);
-    const sw = i === 0 ? 2.2 : 2;
-    parts.push(`<line x1="${p1.x.toFixed(1)}" y1="${p1.y.toFixed(1)}" x2="${p2.x.toFixed(1)}" y2="${p2.y.toFixed(1)}" stroke="${col(s.fretColor)}" stroke-width="${sw}" stroke-linecap="round"/>`);
+    parts.push(`<line x1="${p1.x.toFixed(1)}" y1="${p1.y.toFixed(1)}" x2="${p2.x.toFixed(1)}" y2="${p2.y.toFixed(1)}" stroke="${col(s.fretColor)}" stroke-width="${fretW.toFixed(2)}" stroke-linecap="round"/>`);
   }
 
-  // ----- nut: thick bar on the first fret line — shown ONLY when startFret === 0
-  // (the 0-fret IS the nut; higher starting frets have no nut at all) -----
+  // ----- nut: thick bar on the first fret line — shown ONLY when startFret === 1
+  // (higher starting frets sit mid-neck: no nut there) -----
   if (nutShown(s)) parts.push(renderNut(s, P, positions[0], halfWidthAlong(s, positions[0])));
 
-  // ----- strings (float a little before the first fret line for open notes,
-  //       but STOP exactly at the last fret line — never beyond the fretboard) -----
+  // ----- strings — NEVER extend past the starting fret line (t=0) nor past the
+  //       last fret line. When the nut is shown they stop right at its outer edge. -----
   const sl = stringLayout(s);
+  const nutTh = Math.max(2, s.nutWidth);
   for (let i = 0; i < NUM_STRINGS; i++) {
     const off = sl[i].offset;
-    const start = -nutZoneDepth(s) * (nutShown(s) ? 0.75 : 0.4);
+    const start = nutShown(s) ? -nutTh / 2 : 0;
     const end = flen;
     const p1 = P(start, off), p2 = P(end, off);
     parts.push(`<line x1="${p1.x.toFixed(1)}" y1="${p1.y.toFixed(1)}" x2="${p2.x.toFixed(1)}" y2="${p2.y.toFixed(1)}" stroke="${col(s.stringColor)}" stroke-width="${sl[i].width.toFixed(2)}"/>`);
@@ -133,7 +135,7 @@ export function renderSvg(doc: ChordDoc, settings: Settings, opts: RenderOpts & 
   }
 
   // ----- O / X markers in the floating zone before the first fret line — only when
-  //       the nut is actually shown there (startFret === 0). Higher starting frets
+  //       the nut is actually shown there (startFret === 1). Higher starting frets
   //       have no nut: open dots simply float "behind" the board. -----
   if (nutShown(s)) parts.push(renderOpenMarkers(doc, s, P));
 
@@ -169,7 +171,7 @@ function renderBoardPanel(
   const steps = 24;
   const leftPts: string[] = [];
   const rightPts: string[] = [];
-  const tStart = nutShown(s) ? -nutZoneDepth(s) * 0.25 : 0;
+  const tStart = nutShown(s) ? -Math.max(2, s.nutWidth) / 2 : 0;
   const tEnd = flen; // the board ends at the last fret line — no wood beyond it
   for (let i = 0; i <= steps; i++) {
     const t = tStart + ((tEnd - tStart) * i) / steps;

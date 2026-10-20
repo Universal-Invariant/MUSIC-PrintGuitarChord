@@ -81,9 +81,13 @@ export interface Settings {
   minStringWidth: number;
   maxStringWidth: number;
   nutWidth: number;          // nut bar thickness (px), drawn centered on the 0-fret line
-  boardTaper: number;        // 0..1 — fretboard side taper: 0 ⇒ constant width; higher ⇒
-                             // WIDER toward the nut / lower frets and narrower toward the
-                             // high frets (like a real fretboard fan). Follows ABSOLUTE
+  fretThickness: number;     // fret wire thickness (px) used to stroke every fret line
+                             // (thin/narrow = vintage frets, larger = jumbo frets)
+  reverseStrings: boolean;   // true ⇒ string order flipped (6 5 4 3 2 1 — left- vs right-handed)
+  boardTaper: number;        // 0..1 — REAL guitar fretboard fan: the NUT end is the
+                             // NARROWEST point of the board and the width GROWS toward
+                             // the higher frets (it never shrinks). 0 ⇒ constant width;
+                             // higher ⇒ wider at the high-fret end. Follows ABSOLUTE
                              // fret positions, so it survives flips and startFret changes.
   fretLabels: FretLabelMode; // show all / none / a custom set of fret numbers
   fretLabelList: string;     // comma/range list e.g. "3-5, 8, 12" (used when fretLabels='custom')
@@ -155,10 +159,10 @@ export function isHiddenRel(s: Settings, rel: number): boolean {
   return !isOpenRel(rel) && (rel < 0 || rel > s.numFrets - 1);
 }
 
-/** true ⇒ the nut bar is drawn. The nut exists only when the view starts at fret 0 —
- *  there is no "0 fret" of its own; fret 0 IS the nut / open strings. */
+/** true ⇒ the nut bar is drawn. The nut exists ONLY when the view starts at fret 1 —
+ *  higher starting frets sit mid-neck, where a real guitar has no nut. */
 export function nutShown(s: Settings): boolean {
-  return s.startFret === 0;
+  return s.startFret === 1;
 }
 
 export function isStandardShape(name: string, s: Settings): boolean {

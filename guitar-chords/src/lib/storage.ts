@@ -43,6 +43,8 @@ export const DEFAULT_SETTINGS: Settings = {
   minStringWidth: 1.2,
   maxStringWidth: 3.6,
   nutWidth: 7,
+  fretThickness: 2.5,
+  reverseStrings: false,
   fretLabels: 'all',
   fretLabelList: '',
   openSide: 'nut',
@@ -107,7 +109,9 @@ export function loadSettings(): Settings {
     }
     delete parsed.boardWidth;
     delete parsed.nutTaper;
-    delete (parsed as Record<string, unknown>).showNut; // legacy toggle — nut now follows startFret === 0
+    delete (parsed as Record<string, unknown>).showNut; // legacy toggle — nut now follows startFret === 1
+    // legacy: the nut used to appear at startFret 0; frets are 1-based now.
+    if (typeof parsed.startFret === 'number' && parsed.startFret < 1) parsed.startFret = 1;
     // legacy: fingeringsLeft used to mean "nut at top/left"; now flipAlong mirrors it.
     if (parsed.flipAlong == null && typeof parsed.fingeringsLeft === 'boolean') {
       parsed.flipAlong = !parsed.fingeringsLeft;
@@ -115,6 +119,13 @@ export function loadSettings(): Settings {
     const merged = { ...structuredClone(DEFAULT_SETTINGS), ...parsed };
     if (typeof merged.flipAlong !== 'boolean') merged.flipAlong = false;
     if (typeof merged.flipAcross !== 'boolean') merged.flipAcross = false;
+    if (typeof merged.reverseStrings !== 'boolean') merged.reverseStrings = false;
+    if (typeof merged.fretThickness !== 'number' || !Number.isFinite(merged.fretThickness)) merged.fretThickness = DEFAULT_SETTINGS.fretThickness;
+    merged.fretThickness = Math.max(0.5, Math.min(12, merged.fretThickness));
+    // real guitar geometry: the last slot can never be wider than the first one
+    if (typeof merged.lastFretSize === 'number' && typeof merged.firstFretSize === 'number') {
+      merged.lastFretSize = Math.min(merged.lastFretSize, merged.firstFretSize);
+    }
     if (merged.fretLabels !== 'all' && merged.fretLabels !== 'none' && merged.fretLabels !== 'custom') merged.fretLabels = 'all';
     if (typeof merged.fretLabelList !== 'string') merged.fretLabelList = '';
     if (merged.openSide !== 'nut' && merged.openSide !== 'far') merged.openSide = 'nut';

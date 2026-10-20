@@ -16,12 +16,12 @@
 //  • Logarithmic spacing follows real guitar geometry: slot widths SHRINK geometrically
 //    toward higher frets (firstFretSize ≥ lastFretSize).
 //  • A single `boardTaper` factor (0..1) controls the trapezoidal sides with the REAL
-//    fretboard direction: the LOW-fret / nut end is WIDER and the board narrows toward
-//    the high frets. Width depends only on ABSOLUTE fret positions, so moving the
-//    starting fret keeps the feel consistent across chords.
-//  • The nut bar exists ONLY when startFret === 0 (fret 0 IS the nut; there is no
-//    separate "0 fret"). Open-string dots float in a small zone before the first
-//    visible fret line; strings themselves never extend past the last fret line.
+//    guitar direction: the NUT / low-fret end is the NARROWEST point of the board and
+//    the width GROWS toward the higher frets (it never shrinks). Width depends only on
+//    ABSOLUTE fret positions, so moving the starting fret keeps the feel consistent.
+//  • The nut bar exists ONLY when startFret === 1 (mid-neck views have no nut). Open
+//    string dots float in a small zone before the first visible fret line; strings
+//    never extend past the starting fret line nor past the last fret line.
 
 import type { Settings } from './types';
 import { nutShown } from './types';
@@ -76,16 +76,16 @@ export function fretLength(s: Settings): number {
 }
 
 /**
- * Half-width of the fretboard at an ABSOLUTE fret position — REAL fretboard
- * direction: widest at the low frets / nut, narrowing toward higher frets.
- * With taper t, the width at fret f is  W(f) = W12 · (1 + t·(2^(-f/12) − 1)).
- * taper 0 ⇒ constant width everywhere; higher ⇒ wider at the nut end.
+ * Half-width of the fretboard at an ABSOLUTE fret position — REAL guitar
+ * direction: the nut / low-fret end is the NARROWEST point of the board and
+ * the width GROWS toward higher frets (it never shrinks).
+ * With taper t, the width at fret f is  W(f) = W0 · (1 + t·(2^(f/12) − 1)).
+ * taper 0 ⇒ constant width everywhere; higher ⇒ wider toward the high frets.
  */
 export function halfWidthAtFret(s: Settings, absFret: number): number {
-  const hwMax = boardAcross(s) / 2;
-  const hw12 = hwMax / (1 + s.boardTaper * (Math.SQRT2 - 1));
-  const factor = 1 + s.boardTaper * (Math.pow(2, -absFret / 12) - 1);
-  return hw12 * factor;
+  const hwMin = boardAcross(s) / 2; // narrowest point = the nut / 0-fret end
+  const factor = 1 + s.boardTaper * (Math.pow(2, absFret / 12) - 1);
+  return hwMin * factor;
 }
 
 /** Half-width at a point along the fret axis (t is 0 at the nut line, grows toward high frets). */
@@ -100,9 +100,16 @@ export function halfWidthAlong(s: Settings, t: number): number {
   return hw0 + (hwE - hw0) * (tc / L);
 }
 
+/** true ⇒ string order reversed (low E first) — "left-handed" string layout. */
+export function stringsReversed(s: Settings): boolean {
+  return !!s.reverseStrings;
+}
+
 /** String line offsets across the board relative to the CENTER line (−span/2 … +span/2).
- *  Index 0 = high e. flipAcross mirrors the whole string fan; gauges travel WITH each
- *  string, so flipping never reorders bass/treble relative to their dots. */
+ *  Index 0 = high e. reverseStrings swaps the physical ORDER of the strings on the
+ *  board (1 2 3 4 5 6 ⇄ 6 5 4 3 2 1 — left- vs right-handed layout); gauges travel
+ *  WITH each string. flipAcross mirrors the whole fan; both compose consistently so
+ *  dots, labels, markers and hit-testing all follow the same layout. */
 export function stringLayout(s: Settings): { offset: number; width: number }[] {
   const out: { offset: number; width: number }[] = [];
   const span = (NUM_STRINGS - 1) * s.stringGap;
@@ -111,13 +118,14 @@ export function stringLayout(s: Settings): { offset: number; width: number }[] {
     let w: number;
     if (s.stringWidthMode === 'uniform') w = s.minStringWidth;
     else w = s.minStringWidth + ((s.maxStringWidth - s.minStringWidth) * i) / (NUM_STRINGS - 1);
-    out.push({ offset: sign * (i * s.stringGap - span / 2), width: w });
+    const slot = stringsReversed(s) ? (NUM_STRINGS - 1 - i) : i;
+    out.push({ offset: sign * (slot * s.stringGap - span / 2), width: w });
   }
   return out;
 }
 
 /** Floating zone depth before the first fret line (for open-note dots & string pitches).
- *  Deeper when the nut bar itself is shown (startFret === 0). */
+ *  Deeper when the nut bar itself is shown (startFret === 1). */
 export function nutZoneDepth(s: Settings): number {
   return nutShown(s) ? Math.max(30, s.nutWidth + 24) : OPEN_ZONE;
 }

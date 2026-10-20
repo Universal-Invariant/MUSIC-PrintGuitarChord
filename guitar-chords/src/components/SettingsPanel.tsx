@@ -84,7 +84,8 @@ export default function SettingsPanel({ settings, onChange, customs, onCustomsCh
         <label className="row"><span>Frets displayed</span>
           <input type="number" min={1} max={27} value={s.numFrets} onChange={e => set({ numFrets: Math.max(1, Math.min(27, Number(e.target.value))) })} /></label>
         <label className="row"><span>Starting fret</span>
-          <input type="number" min={0} max={24} value={s.startFret} onChange={e => set({ startFret: Math.max(0, Number(e.target.value)) })} /></label>
+          <input type="number" min={1} max={24} value={s.startFret} onChange={e => set({ startFret: Math.max(1, Number(e.target.value)) })} /></label>
+        <div className="mini-note">The nut is shown only when the starting fret is 1; higher starting frets hide it automatically.</div>
         <label className="row"><span>Orientation</span>
           <select value={s.orientation} onChange={e => set({ orientation: e.target.value as Settings['orientation'] })}>
             <option value="vertical">Vertical (classic chord box)</option>
@@ -96,7 +97,8 @@ export default function SettingsPanel({ settings, onChange, customs, onCustomsCh
             <option value="far">Nut at bottom / right (mirrored, frets grow up / left)</option>
           </select></label>
         <label className="row check"><input type="checkbox" checked={s.flipAcross} onChange={e => set({ flipAcross: e.target.checked })} /><span>Flip fret numbers across — mirror bass/treble order</span></label>
-        <div className="mini-note">Both flips mirror the whole drawing (nut, taper, spacing, dots and labels together); the board stays centered in the canvas.</div>
+        <label className="row check"><input type="checkbox" checked={s.reverseStrings} onChange={e => set({ reverseStrings: e.target.checked })} /><span>Reverse string order (6 5 4 3 2 1) — left-handed layout</span></label>
+        <div className="mini-note">Both flips mirror the whole drawing (nut, taper, spacing, dots and labels together); the board stays centered in the canvas. Reversing string order swaps the physical positions of the strings (low E ↔ high e); gauges, pitch labels, fingering labels, note dots and click hit-testing all follow the same layout.</div>
         <div className="row"><span>Canvas padding (px)</span></div>
         <div className="margins-grid">
           {(['top', 'right', 'bottom', 'left'] as const).map(side => (
@@ -125,12 +127,17 @@ export default function SettingsPanel({ settings, onChange, customs, onCustomsCh
       </Section>
 
       <Section title="Nut, taper & fret spacing">
-        <div className="mini-note">The nut shows automatically when the starting fret is 0 (fret 0 <b>is</b> the nut — there is no separate 0-fret). Open-string dots float before the first fret line; strings never extend past the last fret.</div>
+        <div className="mini-note">The nut shows automatically when the starting fret is 1 — higher starting frets sit mid-neck and hide it. Open-string dots float before the first fret line; strings never extend past the starting fret or the last fret.</div>
+        <label className="row"><span>Show nut{nutShown(s) ? '' : ' (hidden — start at fret 1 to show)'}</span>
+          <input type="checkbox" checked={nutShown(s)} disabled title="The nut follows the starting fret automatically: shown only when the starting fret is 1" /></label>
         <label className="row"><span>Nut width (px)</span>
           <input type="range" min={2} max={20} value={s.nutWidth} onChange={e => set({ nutWidth: Number(e.target.value) })} disabled={!nutShown(s)} /><b style={{ fontSize: 11 }}>{s.nutWidth}</b></label>
+        <label className="row"><span>Fret thickness (px)</span>
+          <input type="range" min={0.5} max={10} step={0.5} value={s.fretThickness} onChange={e => set({ fretThickness: Number(e.target.value) })} /><b style={{ fontSize: 11 }}>{s.fretThickness}</b></label>
+        <div className="mini-note">Fret-wire stroke used for every fret line — small values look like thin/vintage frets, larger ones like medium/jumbo frets.</div>
         <label className="row"><span>Fretboard taper</span>
           <input type="range" min={0} max={100} value={Math.round(s.boardTaper * 100)} onChange={e => set({ boardTaper: Number(e.target.value) / 100 })} /><b style={{ fontSize: 11 }}>{Math.round(s.boardTaper * 100)}%</b></label>
-        <div className="mini-note">Taper follows real guitar geometry: the board is WIDER toward the nut / low frets and narrows toward the high frets. 0% ⇒ constant width; higher ⇒ wider trapezoid at the nut end. It follows absolute fret positions, so it stays consistent when you change the starting fret or flip the board.</div>
+        <div className="mini-note">Taper follows real guitar geometry: the nut end is the NARROWEST point of the board and it gets WIDER toward the higher frets (never narrower). 0% ⇒ constant width; higher ⇒ wider trapezoid at the high-fret end. It follows absolute fret positions, so it stays consistent when you change the starting fret or flip the board.</div>
         <label className="row"><span>Fret numbers</span>
           <select value={s.fretLabels} onChange={e => set({ fretLabels: e.target.value as Settings['fretLabels'] })}>
             <option value="all">Show all</option>
@@ -154,10 +161,16 @@ export default function SettingsPanel({ settings, onChange, customs, onCustomsCh
           </select></label>
         {s.spacing === 'logarithmic' && <>
           <label className="row"><span>First fret size (px)</span>
-            <input type="number" min={8} max={200} value={s.firstFretSize} onChange={e => set({ firstFretSize: Number(e.target.value) })} /></label>
+            <input type="number" min={8} max={200} value={s.firstFretSize} onChange={e => {
+              const v = Math.max(8, Number(e.target.value) || 8);
+              set({ firstFretSize: v, lastFretSize: Math.min(s.lastFretSize, v) });
+            }} /></label>
           <label className="row"><span>Last fret size (px)</span>
-            <input type="number" min={4} max={200} value={s.lastFretSize} onChange={e => set({ lastFretSize: Number(e.target.value) })} /></label>
-          <div className="mini-note">Slot widths shrink geometrically from the first to the last displayed fret.</div>
+            <input type="number" min={4} max={Math.min(200, s.firstFretSize)} value={s.lastFretSize} onChange={e => {
+              const v = Math.max(4, Math.min(s.firstFretSize, Number(e.target.value) || 4));
+              set({ lastFretSize: v });
+            }} /></label>
+          <div className="mini-note">Slot widths shrink geometrically from the first to the last displayed fret — like a real guitar. The last fret size can never exceed the first one.</div>
         </>}
         <label className="row check"><input type="checkbox" checked={s.showDots} onChange={e => set({ showDots: e.target.checked })} /><span>Fret dot markers (3,5,7,9 / double 12)</span></label>
         <ColorPicker label="Inlay color" compact value={s.dotMarkerColor} onChange={c => setColor('dotMarkerColor', c)} />
