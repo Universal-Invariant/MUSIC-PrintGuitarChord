@@ -242,6 +242,11 @@ export function chordId(c: ChordDoc): string {
 /** Canvas position + size of one chord on the page (page coords, unscaled units). */
 export interface ChordPlacement { x: number; y: number; w: number; h: number; scale: number }
 
+/** Placement boxes overlap? (used to keep chords from stacking on top of each other) */
+export function placementsOverlap(a: ChordPlacement, b: ChordPlacement): boolean {
+  return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+}
+
 export type PageSizeName = 'letter' | 'legal' | 'a4' | 'a3' | 'custom';
 
 export interface PageConfig {
