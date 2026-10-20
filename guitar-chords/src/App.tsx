@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { ChordDoc, Dot, PageConfig, PageDoc, Settings } from './lib/types';
+import type { ChordDoc, ChordPlacement, Dot, PageConfig, PageDoc, Settings } from './lib/types';
 import {
   MIN_NUM_FRETS, chordPatchFrom, clampNumFrets, clampStartFret, fitsPage,
-  mergeChordSettings, pageSizePx, snapVal, uid,
+  mergeChordSettings, pageSizePx, placementsOverlap, snapVal, uid,
 } from './lib/types';
 import { cellCenter, composePage, hitTest, makeDot, renderSvg, svgInner } from './lib/render';
 import { canvasSize, fingeringPos } from './lib/geometry';
@@ -12,7 +12,8 @@ import {
   loadActivePageId, loadChordList, loadCustomShapes, loadPages, loadSettings, packRows,
   paginateRows, saveActivePageId, saveChordList, saveCustomShapes, savePages, saveSettings,
 } from './lib/storage';
-import { CHORD_LIBRARY, suggestNoteNames } from './lib/music';
+import { CHORD_LIBRARY, analyzeChord, chordMatchesQuery, suggestNoteNames } from './lib/music';
+import { HistoryManager } from './lib/history';
 import SettingsPanel from './components/SettingsPanel';
 import ItemDialog, { newFingering, newText } from './components/ItemDialog';
 
@@ -24,6 +25,8 @@ function intrinsic(markup: string): { w: number; h: number } {
   const m = markup.match(/data-w="(\d+(?:\.\d+)?)" data-h="(\d+(?:\.\d+)?)"/);
   return m ? { w: parseFloat(m[1]), h: parseFloat(m[2]) } : { w: 320, h: 420 };
 }
+
+const jsonSnap = (v: unknown) => JSON.parse(JSON.stringify(v));
 
 export default function App() {
   // ---------- persisted state ----------
@@ -79,18 +82,50 @@ export default function App() {
   const pageDragRef = useRef<{ id: string; sx: number; sy: number; ox: number; oy: number } | null>(null);
   const boardWrapRef = useRef<HTMLDivElement>(null);
   const printRef = useRef<HTMLDivElement>(null);
+  const lastClickRef = useRef<{ x: number; y: number; t: number } | null>(null);
   const [patchClip, setPatchClip] = useState<ReturnType<typeof chordPatchFrom> | null>(null);
-  const [undoStack, setUndoStack] = useState<PageDoc[]>([]);
-  const [redoStack, setRedoStack] = useState<PageDoc[]>([]);
+
+  // ---------- undo / redo (HistoryManager over `pages` + `chords` slices) ----------
   const pagesRef = useRef(pages); useEffect(() => { pagesRef.current = pages; }, [pages]);
+  const chordsRef = useRef(chords); useEffect(() => { chordsRef.current = chords; }, [chords]);
   const pageIdxRef = useRef(pageIdx); useEffect(() => { pageIdxRef.current = pageIdx; }, [pageIdx]);
 
+  const histRef = useRef<HistoryManager | null>(null);
+  if (!histRef.current) histRef.current = new HistoryManager();
+  const hist = histRef.current;
+  // keep fresh accessors (they close over the latest state setters)
+  hist.register('pages', {
+    serialize: () => jsonSnap(pagesRef.current),
+    restore: snap => {
+      const list = snap as PageDoc[];
+      setPages(list);
+      const i = Math.max(0, Math.min(list.length - 1, pageIdxRef.current));
+      setPageIdx(i);
+      const id = list[i]?.id;
+      if (id) saveActivePageId(id);
+    },
+  });
+  hist.register('chords', {
+    serialize: () => jsonSnap(chordsRef.current),
+    restore: snap => setChords(snap as ChordDoc[]),
+  });
+
+  const [histTick, setHistTick] = useState(0);
+  useEffect(() => { hist.onChange(() => setHistTick(t => t + 1)); }, [hist]);
+  void histTick; // button disabled states re-render on every history change
+
+  /** Record the CURRENT page-list state before a mutation (clears redo).
+   *  Suppressed while a continuous drag gesture is in progress so an entire
+   *  drag coalesces into the single snapshot taken at gesture start. */
   const pushHistory = useCallback(() => {
-    const cur = pagesRef.current[pageIdxRef.current];
-    if (!cur) return;
-    setUndoStack(u => [...u.slice(-49), structuredClone(cur)]);
-    setRedoStack([]);
-  }, []);
+    if (histPausedRef.current) return;
+    hist.commit('pages', jsonSnap(pagesRef.current));
+  }, [hist]);
+
+  /** Record the CURRENT library state before a mutation. */
+  const pushLibHistory = useCallback(() => {
+    hist.commit('chords', jsonSnap(chordsRef.current));
+  }, [hist]);
 
   /** Mutate the selected chord doc (history-aware). */
   const mutate = useCallback((fn: (d: ChordDoc) => ChordDoc) => {
@@ -104,37 +139,38 @@ export default function App() {
     });
   }, [selectedId, setPage, pushHistory]);
 
-  /** Mutate the selected chord's per-chord settings patch. */
+  /** Mutate the selected chord's per-chord settings patch (history-aware). */
   const setEff = useCallback((next: Settings) => {
     if (!selectedId) return;
+    pushHistory();
     setPage(p => {
       const i = p.chords.findIndex(c => c.id === selectedId);
       if (i < 0) return p;
       p.chords[i].settings = chordPatchFrom(next);
       return p;
     });
-  }, [selectedId, setPage]);
+  }, [selectedId, setPage, pushHistory]);
 
-  const undo = useCallback(() => {
-    setUndoStack(u => {
-      if (!u.length) return u;
-      const last = u[u.length - 1];
-      const i = pageIdxRef.current;
-      setRedoStack(r => [structuredClone(pagesRef.current[i]), ...r]);
-      setPages(list => list.map((q, j) => (j === i ? structuredClone(last) : q)));
-      return u.slice(0, -1);
-    });
+  // ---------- coalesced snapshots for continuous drags ----------
+  // A drag records ONE snapshot when it starts; intermediate moves must not
+  // push more history.  `histPaused` suppresses pushHistory until the gesture
+  // ends (pointer up / next discrete action).
+  const histPausedRef = useRef(false);
+  const beginDragHistory = useCallback(() => {
+    if (!histPausedRef.current) hist.commit('pages', jsonSnap(pagesRef.current));
+    histPausedRef.current = true;
+  }, [hist]);
+  const endDragHistory = useCallback(() => { histPausedRef.current = false; }, []);
+
+  /** Mutate the page list WITHOUT recording history (continuous drag moves). */
+  const setPageNoHist = useCallback((fn: (p: PageDoc) => PageDoc) => {
+    setPages(list => list.map((p, i) => (i === pageIdxRef.current ? fn(structuredClone(p)) : p)));
   }, []);
-  const redo = useCallback(() => {
-    setRedoStack(r => {
-      if (!r.length) return r;
-      const next = r[0];
-      const i = pageIdxRef.current;
-      setUndoStack(u => [...u, structuredClone(pagesRef.current[i])]);
-      setPages(list => list.map((q, j) => (j === i ? structuredClone(next) : q)));
-      return r.slice(1);
-    });
-  }, []);
+
+  const undo = useCallback(() => { hist.undoAll(); }, [hist]);
+  const redo = useCallback(() => { hist.redoAll(); }, [hist]);
+  const canUndo = hist.canUndo();
+  const canRedo = hist.canRedo();
 
   // ---------- rendering ----------
   const size = useMemo(() => canvasSize(eff), [eff]);
@@ -184,6 +220,16 @@ export default function App() {
   const onBoardClick = (e: React.MouseEvent) => {
     if (!entry || dragging || pageDrag) return;
     e.stopPropagation();
+    // Some browsers suppress dblclick when the second click's default is prevented
+    // anywhere in its path — implement double-click manually (400 ms / 8 px window).
+    const now = performance.now();
+    const prev = lastClickRef.current;
+    if (prev && now - prev.t < 400 && Math.hypot(e.clientX - prev.x, e.clientY - prev.y) < 8) {
+      lastClickRef.current = null;
+      openEditAt(e);            // double-click → open the edit dialog
+      return;
+    }
+    lastClickRef.current = { x: e.clientX, y: e.clientY, t: now };
     const { x, y } = toBoardCoords(e);
     const hit = hitTest(eff, x, y);
 
@@ -262,11 +308,12 @@ export default function App() {
     return best.sel;
   };
 
-  // edit dialog opens via Alt+click or right-click (double-click is unreliable)
+  // edit dialog opens via double-click, Alt+click or right-click
   const openEditAt = (e: React.MouseEvent) => {
     if (!entry) return;
     e.preventDefault();
     e.stopPropagation();
+    lastClickRef.current = null;
     const { x, y } = toBoardCoords(e);
     const s = pickItem(x, y);
     if (s) { setSel(s); setEditing(s); }
@@ -280,6 +327,7 @@ export default function App() {
     if (s && s.kind === 'text') {
       const t = entry.texts.find(tt => tt.id === s.id)!;
       dragRef.current = { dx: x - t.x * size.w, dy: y - t.y * size.h };
+      beginDragHistory();          // ONE snapshot for the whole drag gesture
       setDragging(true);
       setSel(s);
     }
@@ -289,7 +337,7 @@ export default function App() {
     const { x, y } = toBoardCoords(e);
     const nx = (x - dragRef.current.dx) / size.w;
     const ny = (y - dragRef.current.dy) / size.h;
-    setPage(p => {
+    setPageNoHist(p => {           // intermediate moves never touch history
       const i = p.chords.findIndex(c => c.id === selectedId);
       if (i < 0) return p;
       p.chords[i].texts = p.chords[i].texts.map(t => (t.id === sel.id ? { ...t, x: nx, y: ny } : t));
@@ -298,14 +346,45 @@ export default function App() {
   };
   const onBoardPointerUp = () => {
     if (dragging) {
-      pushHistory();
+      endDragHistory();            // re-arm history after the gesture
       setTimeout(() => setDragging(false), 0);
     }
     dragRef.current = null;
   };
 
   // ---------- page-level interactions (select / move chords) ----------
+  // Selection changes are UI state, not document content — they must not be
+  // undoable and must not clear the redo branch. `setPage` clones deeply, so
+  // a pure selection change leaves the serialized snapshot identical and the
+  // history dedup in HistoryManager.commit ignores it automatically.
   const selectChord = (id: string | null) => setPage(p => { p.selected = id; return p; });
+
+  /** Page-space rect of a chord's placement box (accounts for scale). */
+  const chordRect = (pl: ChordPlacement): ChordPlacement => ({
+    x: pl.x, y: pl.y, w: pl.w * pl.scale, h: pl.h * pl.scale, scale: pl.scale,
+  });
+
+  /** Find a free top-left position for a nat-sized box on the page (grid-stepped scan). */
+  function findFreeSpot(p: PageDoc, nat: { w: number; h: number }): { x: number; y: number } {
+    const cfg = p.config;
+    const ps = pageSizePx(cfg);
+    const bw = Math.min(nat.w, ps.w), bh = Math.min(nat.h, ps.h);
+    const taken = Object.values(p.placements).map(chordRect);
+    const overlaps = (px: number, py: number) =>
+      taken.some(t => px < t.x + t.w && px + bw > t.x && py < t.y + t.h && py + bh > t.y);
+    const step = Math.max(20, cfg.gridSize);
+    for (let ty = 20; ty + bh <= ps.h; ty += step) {
+      for (let tx = 20; tx + bw <= ps.w; tx += step) {
+        if (!overlaps(tx, ty)) return { x: snapVal(tx, cfg), y: snapVal(ty, cfg) };
+      }
+    }
+    // page is full — cascade diagonally so the new chord is at least visibly offset
+    const off = ((p.chords.length % 8) + 1) * step;
+    return {
+      x: Math.max(0, Math.min(ps.w - bw, 20 + off)),
+      y: Math.max(0, Math.min(ps.h - bh, 20 + off)),
+    };
+  }
 
   const onPageBackgroundDown = (e: React.MouseEvent) => {
     // clicking the empty page deselects the current chord
@@ -316,12 +395,15 @@ export default function App() {
 
   const onChordBoxDown = (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
+    if (e.button !== 0) return;               // left button only
     selectChord(id);
     if (!page) return;
     const { x, y } = toPageCoords(e);
     const pl = page.placements[id];
     if (!pl) return;
-    pageDragRef.current = { id, sx: x, sy: y, ox: pl.x, oy: pl.y };
+    // grab offset INSIDE the (scaled) box so the chord doesn't jump on first move
+    pageDragRef.current = { id, sx: x - pl.x, sy: y - pl.y, ox: pl.x, oy: pl.y };
+    beginDragHistory();                        // ONE snapshot per drag gesture
     setPageDrag(true);
   };
   const onChordBoxMove = (e: React.MouseEvent) => {
@@ -330,17 +412,50 @@ export default function App() {
     const { x, y } = toPageCoords(e);
     const cfg = page.config;
     const ps = pageSizePx(cfg);
-    const pl = page.placements[ref.id];
-    if (!pl) return;
+    const cur = page.placements[ref.id];
+    if (!cur) return;
     let nx = snapVal(ref.ox + (x - ref.sx), cfg);
     let ny = snapVal(ref.oy + (y - ref.sy), cfg);
-    nx = Math.max(0, Math.min(ps.w - pl.w, nx));
-    ny = Math.max(0, Math.min(ps.h - pl.h, ny));
-    setPage(p => { p.placements[ref.id] = { ...p.placements[ref.id], x: nx, y: ny }; return p; });
+    nx = Math.max(0, Math.min(ps.w - cur.w * cur.scale, nx));
+    ny = Math.max(0, Math.min(ps.h - cur.h * cur.scale, ny));
+    setPageNoHist(p => { p.placements[ref.id] = { ...p.placements[ref.id], x: nx, y: ny }; return p; });
   };
   const onChordBoxUp = () => {
-    if (pageDrag) {
-      pushHistory();
+    const ref = pageDragRef.current;
+    if (pageDrag && ref && page) {
+      endDragHistory();
+      // Chords should never sit on top of each other: if the drop position
+      // overlaps another box, nudge this one to the nearest free spot.
+      // This happens AFTER the gesture ended, so it records its own snapshot.
+      setPage(p => {
+        const self = p.placements[ref.id];
+        if (!self) return p;
+        const others = Object.entries(p.placements)
+          .filter(([k]) => k !== ref.id)
+          .map(([, v]) => chordRect(v));
+        const collides = (r: ChordPlacement) => others.some(o => placementsOverlap(r, o));
+        if (collides(self)) {
+          const step = Math.max(10, p.config.gridSize || 10);
+          const inside = (r: ChordPlacement) => fitsPage(r, pageSizePx(p.config));
+          let best: ChordPlacement | null = null;
+          outer: for (let radius = 1; radius <= 40; radius++) {
+            for (let dy = -radius; dy <= radius; dy++) {
+              for (let dx = -radius; dx <= radius; dx++) {
+                if (Math.abs(dx) !== radius && Math.abs(dy) !== radius) continue;
+                const cand: ChordPlacement = {
+                  ...self,
+                  x: Math.max(0, Math.min(pageSizePx(p.config).w - self.w * self.scale, self.x + dx * step)),
+                  y: Math.max(0, Math.min(pageSizePx(p.config).h - self.h * self.scale, self.y + dy * step)),
+                };
+                if (inside(cand) && !collides(cand)) { best = cand; break outer; }
+              }
+            }
+          }
+          if (best) p.placements[ref.id] = best;
+          else flash('No free spot found — chords overlap');
+        }
+        return p;
+      });
       setTimeout(() => setPageDrag(false), 0);
     }
     pageDragRef.current = null;
@@ -434,18 +549,8 @@ export default function App() {
     setPage(p => {
       const es = mergeChordSettings(settings, c.settings);
       const nat = intrinsic(renderSvg(c, es, { customs }));
-      const cfg = p.config;
-      const ps = pageSizePx(cfg);
-      // find a free spot (grid-stepped scan)
-      let x = snapVal(40, cfg), y = snapVal(40, cfg);
-      const taken = Object.values(p.placements);
-      const overlaps = (px: number, py: number) =>
-        taken.some(t => px < t.x + t.w && px + nat.w > t.x && py < t.y + t.h && py + nat.h > t.y);
-      outer: for (let ty = y; ty + nat.h <= ps.h; ty += Math.max(20, cfg.gridSize)) {
-        for (let tx = x; tx + nat.w <= ps.w; tx += Math.max(20, cfg.gridSize)) {
-          if (!overlaps(tx, ty)) { x = tx; y = ty; break outer; }
-        }
-      }
+      // find a free spot so new chords never land on top of existing ones
+      const { x, y } = findFreeSpot(p, nat);
       p.chords.push(c);
       p.placements[c.id] = { x, y, w: nat.w, h: nat.h, scale: 1 };
       p.selected = c.id;
@@ -483,6 +588,7 @@ export default function App() {
 
   const renameSelected = (name: string) => {
     if (!selectedId) return;
+    pushHistory();
     setPage(p => {
       const i = p.chords.findIndex(c => c.id === selectedId);
       if (i >= 0) p.chords[i].name = name;
@@ -490,10 +596,12 @@ export default function App() {
     });
   };
 
+  // ---------- My chords library (undoable via the 'chords' history slice) ----------
   const saveSelectedToLibrary = () => {
     if (!entry) { flash('Select a chord first'); return; }
     const name = entry.name.trim() || 'Untitled';
     const rec: ChordDoc = { ...structuredClone(entry), name, settings: chordPatchFrom(eff) };
+    pushLibHistory();
     setChords(list => {
       const i = list.findIndex(c => c.name === name);
       if (i >= 0) { const cp = [...list]; cp[i] = rec; return cp; }
@@ -501,12 +609,32 @@ export default function App() {
     });
     flash(`Saved "${name}" to My chords`);
   };
-  const deleteEntry = (i: number) => setChords(list => list.filter((_, j) => j !== i));
+  const deleteEntry = (i: number) => {
+    pushLibHistory();
+    setChords(list => list.filter((_, j) => j !== i));
+  };
+  const renameEntry = (i: number, name: string) => {
+    pushLibHistory();
+    setChords(list => list.map((c, j) => (j === i ? { ...c, name } : c)));
+  };
+
+  /** Save the current page's chord list into the library as a named set. */
+  const savePageAsSet = () => {
+    if (!page || !page.chords.length) { flash('No chords on this page'); return; }
+    const base = (page.name || 'Chord set').trim();
+    let name = base, n = 2;
+    while (chords.some(c => c.name === name)) name = `${base} (${n++})`;
+    pushLibHistory();
+    for (const c of page.chords) {
+      const rec: ChordDoc = { ...structuredClone(c), name: `${name} · ${c.name}`, settings: c.settings ?? chordPatchFrom(mergeChordSettings(settings, c.settings)) };
+      setChords(list => [...list, rec]);
+    }
+    flash(`Saved ${page.chords.length} chords as “${name}” set`);
+  };
 
   const loadFromLibrary = (c: ChordDoc) => {
     // put the FULL chord (its own layout patch included) onto the current page
     addChordToPage(c, { patch: true });
-    setShowLib(false);
   };
 
   const [toast, setToastMsg] = useState('');
@@ -634,14 +762,28 @@ export default function App() {
   };
 
   const doPrint = () => {
-    if (!page) return;
+    // Clone every page sheet into a hidden container so ONLY the pages print
+    // (the enlarged chord editor and all app chrome stay off-screen).
     const nodes = printRef.current?.querySelectorAll('.print-page');
     if (!nodes || !nodes.length) return;
+    const host = document.createElement('div');
+    host.id = 'print-pages-host';
+    nodes.forEach(n => host.appendChild(n.cloneNode(true)));
     const style = document.createElement('style');
-    style.textContent = '@media print { body * { visibility: hidden; } .print-page, .print-page * { visibility: visible; } .print-page { position: absolute; left: 0; top: 0; width: 100%; page-break-after: always; } .print-page:last-child { page-break-after: auto; } }';
+    style.textContent = `
+      #print-pages-host { display: none; }
+      @media print {
+        body * { visibility: hidden !important; }
+        #print-pages-host { display: block !important; position: absolute; left: 0; top: 0; }
+        #print-pages-host, #print-pages-host * { visibility: visible !important; }
+        #print-pages-host .print-page { position: relative; width: 100%; page-break-after: always; box-shadow: none !important; outline: none !important; }
+        #print-pages-host .print-page:last-child { page-break-after: auto; }
+        #print-pages-host .page-label { display: none !important; }
+      }`;
     document.head.appendChild(style);
+    document.body.appendChild(host);
     window.print();
-    setTimeout(() => style.remove(), 500);
+    setTimeout(() => { style.remove(); host.remove(); }, 500);
   };
 
   const suggestNames = () => {
@@ -659,8 +801,9 @@ export default function App() {
     flash('Note names filled in');
   };
 
-  // ---------- page ops ----------
+  // ---------- page ops (history-aware — the manager tracks the WHOLE list) ----------
   const newPage = () => {
+    pushHistory();
     setPages(list => {
       const lp = list[list.length - 1];
       const np = emptyPage(`Page ${list.length + 1}`);
@@ -672,6 +815,7 @@ export default function App() {
   };
   const dupPage = () => {
     if (!page) return;
+    pushHistory();
     setPages(list => {
       const copy = duplicatePage(page);
       const cp = [...list];
@@ -683,12 +827,48 @@ export default function App() {
   };
   const delPage = () => {
     if (!page) return;
+    pushHistory();
     if (pages.length === 1) { setPages([emptyPage('My page')]); setPageIdx(0); flash('Page cleared'); return; }
     setPages(list => list.filter((_, i) => i !== pageIdx));
-    setPageIdx(i => Math.max(0, Math.min(list_len(pages.length - 2), i - (pageIdx === 0 ? 0 : 1))));
+    setPageIdx(i => Math.max(0, Math.min(pages.length - 2, i - (pageIdx === 0 ? 0 : 1))));
     flash('Page deleted');
   };
-  const list_len = (n: number) => Math.max(0, n);
+
+  // ---------- library browser dialog state ----------
+  const [libTab, setLibTab] = useState<'builtin' | 'mine'>('builtin');
+  const [libQuery, setLibQuery] = useState('');
+  const [libQuality, setLibQuality] = useState<string>('all');
+  const [libRoot, setLibRoot] = useState<number | null>(null);   // pitch class filter
+  const [libPos, setLibPos] = useState<'all' | 'open' | 'barre'>('all');
+  const [renamingIdx, setRenamingIdx] = useState(-1);
+
+  const ROOT_LABELS = ['C', 'C♯/D♭', 'D', 'D♯/E♭', 'E', 'F', 'F♯/G♭', 'G', 'G♯/A♭', 'A', 'A♯/B♭', 'B'];
+
+  /** Built-in chords with derived searchable tags. */
+  const builtinItems = useMemo(() => CHORD_LIBRARY.map(c => ({
+    def: c, tags: analyzeChord(c.name, c.shape),
+  })), []);
+
+  /** My saved chords: tags from dots (absolute frets → low-E..high-e shape). */
+  const mineItems = useMemo(() => chords.map(c => {
+    const shape: (number | null)[] = [null, null, null, null, null, null];
+    for (const d of c.dots) shape[5 - d.string] = d.fret;
+    return { chord: c, tags: analyzeChord(c.name, shape) };
+  }), [chords]);
+
+  const QUALITY_FILTERS = ['all', 'major', 'minor', 'seventh', 'maj7', 'sus', 'dim', 'aug', 'open', 'barre'];
+
+  function passesFilters(tags: string[], name: string): boolean {
+    if (!chordMatchesQuery(name, [], tags, libQuery)) return false;
+    if (libQuality !== 'all' && !tags.includes(libQuality)) return false;
+    if (libRoot != null && !tags.includes(`root:${libRoot}`)) return false;
+    if (libPos !== 'all' && !tags.includes(libPos)) return false;
+    return true;
+  }
+  const filteredBuiltin = builtinItems.filter(it => passesFilters(it.tags, it.def.name));
+  const filteredMine = mineItems.filter(it => passesFilters(it.tags, it.chord.name));
+
+  const resetLibFilters = () => { setLibQuery(''); setLibQuality('all'); setLibRoot(null); setLibPos('all'); };
 
   if (!page || !pageView) return <div className="app">Loading…</div>;
 
@@ -700,14 +880,14 @@ export default function App() {
         <h1>🎸 Guitar Chord Designer</h1>
         <input className="txt name-input" value={page.name} onChange={e => setPage(p => { p.name = e.target.value; return p; })} placeholder="Page name" title="Page name" />
         <div className="toolbar">
-          <button className={`btn tool ${tool === 'dot' ? 'active' : ''}`} onClick={() => setTool('dot')} title="Add/remove note dots on the SELECTED chord. Shift-click cycles colors, Ctrl-click cycles shapes, Alt+click / right-click edits. [1]">● Dots</button>
+          <button className={`btn tool ${tool === 'dot' ? 'active' : ''}`} onClick={() => setTool('dot')} title="Add/remove note dots on the SELECTED chord. Shift-click cycles colors, Ctrl-click cycles shapes, double-click / Alt+click / right-click edits. [1]">● Dots</button>
           <button className={`btn tool ${tool === 'text' ? 'active' : ''}`} onClick={() => setTool('text')} title="Click anywhere to add a free text box [2]">T Text</button>
           <button className={`btn tool ${tool === 'fing' ? 'active' : ''}`} onClick={() => setTool('fing')} title="Click a string at the far end of the fretboard (opposite the nut) to add a fingering label [3]">① Fingering</button>
           <button className={`btn tool ${tool === 'select' ? 'active' : ''}`} onClick={() => setTool('select')} title="Select & drag text boxes, Alt+click / right-click to edit [4]">⇗ Select</button>
         </div>
         <div className="toolbar right">
-          <button className="btn" onClick={undo} title="Undo (Ctrl+Z)">↩</button>
-          <button className="btn" onClick={redo} title="Redo (Ctrl+Shift+Z)">↪</button>
+          <button className="btn" onClick={undo} disabled={!canUndo} title={`Undo (Ctrl+Z) — ${hist.undoCount()} step(s)`}>↩ Undo</button>
+          <button className="btn" onClick={redo} disabled={!canRedo} title={`Redo (Ctrl+Shift+Z / Ctrl+Y) — ${hist.redoCount()} step(s)`}>↪ Redo</button>
           <button className={`btn ${settings.noteVisible ? 'active' : ''}`} onClick={() => setSettings(prev => ({ ...prev, noteVisible: !prev.noteVisible }))}
             title="Note visible mode for the GLOBAL defaults (new chords inherit it). Per-chord toggle lives in Settings → Note pitches.">♪ Notes</button>
           <span className="quick-ovr" title="Quick override of the starting fret — applies to the SELECTED chord">
@@ -805,19 +985,33 @@ export default function App() {
           </div>
 
           <div className="panel-card">
-            <h3>My chords</h3>
+            <h3>My chords <span className="mini">({chords.length}) — press 📚 Library to browse &amp; search</span></h3>
             <div className="chord-list">
               {chords.length === 0 && <div className="mini-note">No saved chords yet. Design one and press Save.</div>}
               {chords.map((c, i) => (
-                <div key={c.id ?? i} className="chord-item">
-                  <button className="load" onClick={() => loadFromLibrary(c)} title="Add to page">{c.name}</button>
+                <div key={c.id ?? i} className={`chord-item ${i === renamingIdx ? 'renaming' : ''}`}>
+                  {i === renamingIdx ? (
+                    <input className="txt rename-input" autoFocus defaultValue={c.name}
+                      onKeyDown={e => {
+                        if (e.key === 'Enter') { renameEntry(i, (e.target as HTMLInputElement).value.trim() || c.name); setRenamingIdx(-1); }
+                        if (e.key === 'Escape') setRenamingIdx(-1);
+                      }}
+                      onBlur={e => { const v = e.target.value.trim(); if (v && v !== c.name) renameEntry(i, v); setRenamingIdx(-1); }} />
+                  ) : (
+                    <button className="load" onClick={() => loadFromLibrary(c)} title="Add to page (double-click to rename)">{c.name}</button>
+                  )}
                   <span className="cnt">{c.dots.length}</span>
-                  <button className="del" onClick={() => deleteEntry(i)} title="Delete">×</button>
+                  <button className="del" onClick={() => setRenamingIdx(i)} title="Rename">✎</button>
+                  <button className="del" onClick={() => deleteEntry(i)} title="Delete from library (undoable with Ctrl+Z)">×</button>
                 </div>
               ))}
             </div>
             <div className="page-ops">
               <button className="btn primary wide" onClick={saveSelectedToLibrary} disabled={!hasSel}>💾 Save selected chord</button>
+            </div>
+            <div className="page-ops">
+              <button className="btn small" onClick={savePageAsSet} disabled={!page.chords.length} title="Save ALL chords of this page into the library as a named set">📦 Save page as set</button>
+              <button className="btn small" onClick={() => { setLibTab('mine'); setShowLib(true); }}>🔎 Browse / search</button>
             </div>
           </div>
 
@@ -837,52 +1031,46 @@ export default function App() {
           <div className="panel-card help">
             <h3>How to use</h3>
             <ul>
-              <li><b>Click a chord box</b> on the page to select it — then edit it normally</li>
-              <li><b>Drag a chord box</b> (Select tool, grab its border/margin) to reposition; snaps to grid</li>
+              <li><b>Click / drag any chord box</b> on the page to select &amp; reposition it (whole box is a handle; snaps to grid, auto-avoids overlaps)</li>
+              <li><b>Edit in the ✏️ board below the sheets</b> — click to add/remove dots and do everything as before</li>
+              <li><b>Double-click / Alt+click / right-click</b> a dot/text → edit properties</li>
               <li><b>Click empty page</b> to deselect; Del removes the selected chord box</li>
-              <li><b>Alt+click / right-click</b> a dot/text → edit properties</li>
               <li>Shift/Ctrl-click dots → cycle colors/shapes</li>
               <li>Each chord keeps its OWN layout — Copy/Paste settings to transfer</li>
+              <li><b>↩ Undo / ↪ Redo</b> (Ctrl+Z / Ctrl+Shift+Z or Ctrl+Y) covers page edits AND library changes; a whole drag counts as one step</li>
+              <li><b>📚 Library browser</b> — search ("Am7", "barre"), filter by quality/root, add chords with one click</li>
             </ul>
           </div>
         </aside>
 
         <section className="canvas-area page-canvas" onMouseMove={onChordBoxMove} onMouseUp={onChordBoxUp} onMouseLeave={onChordBoxUp}>
           <div ref={printRef} className="print-root">
-            {/* one printed sheet per page in the document */}
-            {pages.map((p, pi) => {
-              const ps = pageSizePx(p.config);
-              const chords = p.chords.map(c => {
-                const es = mergeChordSettings(settings, c.settings);
-                const markup = renderSvg(c, es, { customs });
-                const nat = intrinsic(markup);
-                const pl = p.placements[c.id] ?? { x: 40, y: 40, w: nat.w, h: nat.h, scale: 1 };
-                return { id: c.id, x: pl.x, y: pl.y, scale: pl.scale, nw: nat.w, nh: nat.h, inner: svgInner(markup) };
-              });
-              const grid = p.config.showGrid
-                ? `background-image: linear-gradient(#e8edf3 1px, transparent 1px), linear-gradient(90deg, #e8edf3 1px, transparent 1px); background-size: ${p.config.gridSize}px ${p.config.gridSize}px;`
-                : '';
+            {/* one printed sheet per page in the document (renderedPages is
+                pre-computed — identical markup feeds export & print) */}
+            {renderedPages.map((pv, pi) => {
+              const ps = pv.ps;
+              const chords = pv.chords;
               return (
-                <div key={p.id} className={`print-page page-sheet ${pi === pageIdx ? 'cur' : ''}`}
-                  style={{ width: ps.w, height: ps.h, cssText: grid } as React.CSSProperties}
-                  data-page={p.name}>
-                  <div className="page-label">{p.name}{pi === pageIdx ? ' — editing' : ''}</div>
-                  <div className="page-svg-host" style={{ backgroundImage: p.config.showGrid ? undefined : undefined }}>
+                <div key={pv.id} className={`print-page page-sheet ${pi === pageIdx ? 'cur' : ''}`}
+                  style={{ width: ps.w, height: ps.h } as React.CSSProperties}
+                  data-page={pv.name}>
+                  <div className="page-label">{pv.name}{pi === pageIdx ? ' — editing' : ''}</div>
+                  <div className="page-svg-host">
                     <svg xmlns="http://www.w3.org/2000/svg" width={ps.w} height={ps.h} viewBox={`0 0 ${ps.w} ${ps.h}`}
                       className="page-svg" style={{ display: 'block' }}
                       onMouseDown={pi === pageIdx ? onPageBackgroundDown : undefined}>
-                      {p.config.showGrid && (
+                      {pv.config.showGrid && (
                         <>
                           <defs>
-                            <pattern id={`grid-${p.id}`} width={p.config.gridSize} height={p.config.gridSize} patternUnits="userSpaceOnUse">
-                              <path d={`M ${p.config.gridSize} 0 L 0 0 0 ${p.config.gridSize}`} fill="none" stroke="#e2e8f0" strokeWidth="1" />
+                            <pattern id={`grid-${pv.id}`} width={pv.config.gridSize} height={pv.config.gridSize} patternUnits="userSpaceOnUse">
+                              <path d={`M ${pv.config.gridSize} 0 L 0 0 0 ${pv.config.gridSize}`} fill="none" stroke="#e2e8f0" strokeWidth="1" />
                             </pattern>
                           </defs>
                           <rect x="0" y="0" width={ps.w} height={ps.h} fill="#ffffff" />
-                          <rect x="0" y="0" width={ps.w} height={ps.h} fill={`url(#grid-${p.id})`} />
+                          <rect x="0" y="0" width={ps.w} height={ps.h} fill={`url(#grid-${pv.id})`} />
                         </>
                       )}
-                      {!p.config.showGrid && <rect x="0" y="0" width={ps.w} height={ps.h} fill="#ffffff" />}
+                      {!pv.config.showGrid && <rect x="0" y="0" width={ps.w} height={ps.h} fill="#ffffff" />}
                       {chords.map(c => {
                         const cur = pi === pageIdx && c.id === selectedId;
                         return (
@@ -893,7 +1081,7 @@ export default function App() {
                             <rect x="-6" y="-6" width={c.nw + 12} height={c.nh + 12} rx="6"
                               fill="rgba(255,255,255,0.6)" stroke={cur ? '#1f6feb' : 'transparent'} strokeWidth={cur ? 2 / c.scale : 0} strokeDasharray={cur ? `${6 / c.scale} ${4 / c.scale}` : undefined} />
                             <rect x="0" y="0" width={c.nw} height={c.nh} fill="#ffffff" stroke="#e3e7ec" strokeWidth={1 / c.scale} />
-                            <g dangerouslySetInnerHTML={{ __html: c.inner }} />
+                            <g className="chord-content" dangerouslySetInnerHTML={{ __html: c.inner }} />
                           </g>
                         );
                       })}
@@ -914,7 +1102,7 @@ export default function App() {
                   disabled={!hasSel}>🗑 Remove chord</button>
                 <span className="mini">{hasSel ? `${eff.startFret}–${eff.startFret + eff.numFrets - 1} · ${eff.orientation}` : 'Click a chord box above to select it'}</span>
               </div>
-              <div className="board-editor-body" ref={boardWrapRef}
+              <div className="board-editor-body" ref={boardWrapRef} onDoubleClick={e => e.preventDefault()}
                 onMouseDown={onBoardPointerDown} onMouseMove={onBoardPointerMove} onMouseUp={onBoardPointerUp}
                 onClick={onBoardClick} onContextMenu={openEditAt}
                 dangerouslySetInnerHTML={{ __html: boardMarkup }} />
@@ -945,13 +1133,66 @@ export default function App() {
       {showLib && (
         <div className="overlay" onMouseDown={e => { if (e.target === e.currentTarget) setShowLib(false); }}>
           <div className="dialog lib">
-            <div className="dlg-head"><h3>Chord library</h3><button className="btn small" onClick={() => setShowLib(false)}>✕</button></div>
-            <div className="lib-grid">
-              {CHORD_LIBRARY.map(c => (
-                <button key={c.name} className="lib-btn" onClick={() => { addChordToPage(chordFromLibrary(c.name, c.shape, c.fingerings)); setShowLib(false); }}>{c.name}</button>
-              ))}
+            <div className="dlg-head"><h3>📚 Chord library</h3><button className="btn small" onClick={() => setShowLib(false)}>✕</button></div>
+
+            <div className="lib-tabs">
+              <button className={`btn small tab ${libTab === 'builtin' ? 'active' : ''}`} onClick={() => setLibTab('builtin')}>Built-in ({filteredBuiltin.length}/{builtinItems.length})</button>
+              <button className={`btn small tab ${libTab === 'mine' ? 'active' : ''}`} onClick={() => setLibTab('mine')}>My chords ({filteredMine.length}/{mineItems.length})</button>
             </div>
-            <div className="mini-note">Adds the chord as a NEW box on the current page (the previously selected chord stays untouched).</div>
+
+            <div className="lib-filters">
+              <input
+                className="txt lib-search"
+                value={libQuery}
+                onChange={e => setLibQuery(e.target.value)}
+                placeholder='Search — "Am7", "barre", "maj7", root name…'
+                autoFocus
+              />
+              <select className="sel" value={libQuality} onChange={e => setLibQuality(e.target.value)} title="Quality filter">
+                {QUALITY_FILTERS.map(q => <option key={q} value={q}>{q === 'all' ? 'All qualities' : q}</option>)}
+              </select>
+              <select className="sel" value={libRoot == null ? 'all' : String(libRoot)} onChange={e => setLibRoot(e.target.value === 'all' ? null : Number(e.target.value))} title="Root filter">
+                <option value="all">All roots</option>
+                {ROOT_LABELS.map((r, i) => <option key={i} value={i}>{r}</option>)}
+              </select>
+              <select className="sel" value={libPos} onChange={e => setLibPos(e.target.value as 'all' | 'open' | 'barre')} title="Position filter">
+                <option value="all">Any position</option>
+                <option value="open">Open</option>
+                <option value="barre">Barre</option>
+              </select>
+              <button className="btn small" onClick={resetLibFilters} title="Clear all filters">✕ Clear</button>
+            </div>
+
+            <div className="lib-list">
+              {libTab === 'builtin' && (filteredBuiltin.length === 0
+                ? <div className="mini-note empty">No built-in chords match. Try clearing filters.</div>
+                : filteredBuiltin.map(({ def, tags }) => (
+                  <div key={def.name} className="lib-row" title={tags.filter(t => !t.startsWith('root:')).join(', ')}>
+                    <span className="lib-name">{def.name}</span>
+                    <span className="lib-tags">{tags.filter(t => t !== 'open' && t !== 'barre').map(t => <em key={t}>{t}</em>)}</span>
+                    <button className="btn small load" onClick={() => { addChordToPage(chordFromLibrary(def.name, def.shape, def.fingerings), { patch: true }); setShowLib(false); flash(`Added ${def.name} to page`); }}>＋ Add</button>
+                  </div>
+                )))}
+              {libTab === 'mine' && (filteredMine.length === 0
+                ? <div className="mini-note empty">{mineItems.length ? 'No saved chords match.' : 'Nothing saved yet — use "💾 Save selected chord" in the My chords panel.'}</div>
+                : filteredMine.map(({ chord: c, tags }, idx) => {
+                  const realIdx = chords.findIndex(x => x.id === c.id);
+                  return (
+                    <div key={c.id} className="lib-row" title={tags.filter(t => !t.startsWith('root:')).join(', ')}>
+                      {renamingIdx === idx
+                        ? <input className="txt lib-rename" defaultValue={c.name} autoFocus
+                            onKeyDown={e => { if (e.key === 'Enter' || e.key === 'Escape') setRenamingIdx(-1); }}
+                            onBlur={e => { renameEntry(realIdx, e.target.value); setRenamingIdx(-1); }} />
+                        : <span className="lib-name" onDoubleClick={() => setRenamingIdx(idx)} title="Double-click to rename">{c.name}</span>}
+                      <span className="lib-tags">{tags.filter(t => t !== 'open' && t !== 'barre').slice(0, 4).map(t => <em key={t}>{t}</em>)}</span>
+                      <button className="btn small load" onClick={() => { loadFromLibrary(c); setShowLib(false); }}>＋ Add</button>
+                      <button className="btn small del" onClick={() => { deleteEntry(realIdx); }} title="Delete from library (undoable)">×</button>
+                    </div>
+                  );
+                }))}
+            </div>
+
+            <div className="mini-note">Click ＋ Add to drop the chord as a NEW box on the current page (placed clear of existing chords; undoable with Ctrl+Z).</div>
           </div>
         </div>
       )}

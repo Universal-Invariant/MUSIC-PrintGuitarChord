@@ -125,6 +125,26 @@ body { font-family: 'Segoe UI', Arial, sans-serif; background: #eceff3; color: #
 .lib-btn { padding: 10px 4px; font-size: 14px; border-radius: 8px; border: 1px solid #ccd3da; background: #f4f7fa; cursor: pointer; }
 .lib-btn:hover { background: #dceafc; border-color: #7aa7e8; }
 
+/* library browser dialog */
+.dialog.lib { width: 560px; }
+.lib-tabs { display: flex; gap: 6px; margin-bottom: 8px; }
+.lib-tabs .tab { background: #eef1f5; color: #222; border-color: #ccd3da; }
+.lib-tabs .tab.active { background: #1f6feb; color: #fff; border-color: #1f6feb; }
+.lib-filters { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; align-items: center; }
+.lib-search { flex: 1 1 180px; min-width: 140px; }
+.lib-filters .sel { font-size: 12px; padding: 4px 6px; }
+.lib-list { max-height: 46vh; overflow-y: auto; border: 1px solid #e2e7ec; border-radius: 8px; padding: 4px; display: flex; flex-direction: column; gap: 3px; }
+.lib-row { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: 6px; }
+.lib-row:nth-child(odd) { background: #f6f8fb; }
+.lib-row:hover { background: #e7f0fb; }
+.lib-name { font-weight: 600; font-size: 14px; min-width: 70px; cursor: default; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lib-tags { flex: 1; display: flex; gap: 4px; flex-wrap: wrap; overflow: hidden; max-height: 18px; }
+.lib-tags em { font-style: normal; font-size: 10.5px; background: #dde6f0; color: #45526b; padding: 1px 6px; border-radius: 8px; white-space: nowrap; }
+.lib-row .btn.load { background: #1f6feb; color: #fff; border-color: #1f6feb; }
+.lib-row .btn.del { background: #f4d7d5; color: #8c1d18; border-color: #e5b8b4; }
+.lib-rename { flex: 1; }
+.mini-note.empty { text-align: center; padding: 14px 6px; }
+
 .quick-btns { display: flex; gap: 5px; flex-wrap: wrap; }
 .quick-btns .btn { background: #eef1f5; color: #222; border-color: #ccd3da; }
 .shape-preview { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #445; }
@@ -157,7 +177,12 @@ body { font-family: 'Segoe UI', Arial, sans-serif; background: #eceff3; color: #
 .page-label { position: absolute; top: -20px; left: 2px; font-size: 11.5px; color: #5a6674; white-space: nowrap; }
 .page-svg-host { width: 100%; height: 100%; }
 .page-svg { max-width: 100%; height: auto; }
-.page-chord.sel rect:first-of-type { pointer-events: all; }
+.page-chord { cursor: move; }
+
+/* On the page thumbnails, chord content is NOT interactive — the whole box
+   (including its interior) acts as a single drag handle for select/move.
+   The enlarged editor below the sheets is where actual editing happens. */
+.page-chord .chord-content { pointer-events: none; }
 
 .board-editor { width: min(94%, 860px); background: #fff; border-radius: 10px; box-shadow: 0 3px 14px rgba(0,0,0,.2); padding: 10px 14px 16px; }
 .board-editor-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
