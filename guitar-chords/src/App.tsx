@@ -253,23 +253,33 @@ export default function App() {
     return { x: (e.clientX - rect.left) / scale, y: (e.clientY - rect.top) / scale };
   };
   // ---------- per-element coordinate mapping (SVG screen CTMs) ----------
-  // Each chord box registers its <g> element and each page its <svg>. All
-  // pointer math goes through the CURRENT PAGE's single screen CTM plus the
-  // clicked chord's OWN placement (x, y, scale) — never another chord's data.
-  // (The historical bug: lookups keyed off the wrong entry returned the FIRST
-  // chord's coordinates, so every other chord jumped by ~one chord width.)
-  const gRefs = useRef(new Map<string, SVGGElement>());
-  const svgRefs = useRef(new Map<number, SVGSVGElement>());
+  // Each chord box registers its <g> element and each page its <svg>, so pointer
+  // events map through the ELEMENT's own transform chain. This is correct even
+  // when pages are CSS-scaled and chords carry translate+scale transforms —
+  // including the FIRST chord, whose placement used to be mis-measured because
+  // stale width/height values poisoned the naive bounding-rect math.
+  const gRefs = useRef(new Map<string, WeakRef<SVGGElement>>());
+  const svgRefs = useRef(new Map<number, WeakRef<SVGSVGElement>>());
 
-  /** Current page's <svg> element (live, from the ref registry). */
+  // CRITICAL: all coordinate mapping uses ONE shared matrix — the current
+  // page's <svg> screen CTM — captured FRESH at every pointer event. Mixing
+  // per-element CTMs with page-space placement math produced the "drag jumps
+  // by one chord width" bug whenever chords carried scale transforms or lived
+  // on CSS-shrunk sheets (`.page-svg { max-width:100% }`). Because both the
+  // grab offset and the move deltas go through the same matrix, any stale
+  // CSS scale cancels out exactly, even mid-gesture.
+
+  /** Current page's <svg> element (live, from the WeakRef registry). */
   const currentPageSvg = (): SVGSVGElement | null => {
-    const el = svgRefs.current.get(pageIdx);
+    const w = svgRefs.current.get(pageIdx);
+    const el = w?.deref();
     if (el) return el;
     const q = printRef.current?.querySelector(`.page-sheet[data-page-idx="${pageIdx}"] .page-svg`);
     return q instanceof SVGSVGElement ? q : null;
   };
 
-  /** Client px -> page-space coords of page `pi` (via that sheet's screen CTM). */
+  /** Client px -> CURRENT page-space coords (via that page svg's screen CTM).
+   *  `piOverride` targets a different page sheet (cross-page drags). */
   const toPageCoordsAt = (clientX: number, clientY: number, piOverride?: number): { x: number; y: number } => {
     const pi = piOverride ?? pageIdx;
     let svg: SVGSVGElement | null = null;
@@ -288,7 +298,9 @@ export default function App() {
 
   /** Page index whose sheet contains the given client point (-1 = none). */
   const pageAtClient = (clientX: number, clientY: number): number => {
-    for (const [pi, el] of svgRefs.current) {
+    for (const [pi, w] of svgRefs.current) {
+      const el = w.deref();
+      if (!el) { svgRefs.current.delete(pi); continue; }
       try {
         const r = el.getBoundingClientRect();
         if (clientX >= r.left && clientX <= r.right && clientY >= r.top && clientY <= r.bottom) return pi;
@@ -297,8 +309,9 @@ export default function App() {
     return -1;
   };
 
-  /** Client px -> local coords inside chord `id`'s canvas space, derived from
-   *  the shared page matrix + THAT chord's placement (x, y, scale). */
+  /** Client px -> local coords inside a chord's canvas space, derived purely
+   *  from the SHARED page matrix + that chord's placement (x, y, scale). The
+   *  chord must live on the current page; otherwise returns null. */
   const toChordLocalById = (id: string, clientX: number, clientY: number): { x: number; y: number } | null => {
     if (!page) return null;
     const pl = page.placements[id];
@@ -309,21 +322,16 @@ export default function App() {
   };
 
   /** Which chord box contains the given client point? Uses each registered
-   *  <g>'s bounding box in SCREEN space — always fresh, never stale. The
-   *  smallest containing box wins so nested/overlapping boxes resolve to the
-   *  most specific chord. */
+   *  <g>'s bounding box in SCREEN space — always fresh, never stale. */
   const chordAtClient = (clientX: number, clientY: number): string | null => {
-    let best: string | null = null;
-    let bestArea = Infinity;
-    for (const [cid, el] of gRefs.current) {
+    for (const [cid, w] of gRefs.current) {
+      const el = w.deref();
+      if (!el) { gRefs.current.delete(cid); continue; }
       let r: DOMRect;
       try { r = el.getBoundingClientRect(); } catch { continue; }
-      if (clientX >= r.left && clientX <= r.right && clientY >= r.top && clientY <= r.bottom) {
-        const area = r.width * r.height;
-        if (area < bestArea) { bestArea = area; best = cid; }
-      }
+      if (clientX >= r.left && clientX <= r.right && clientY >= r.top && clientY <= r.bottom) return cid;
     }
-    return best;
+    return null;
   };
 
   const findDotAt = (string: number, rel: number): Dot | undefined =>
@@ -588,9 +596,6 @@ export default function App() {
   /** One click inside an on-page chord box while INLINE EDIT is ON. */
   const handleInlineChordClick = (id: string, e: React.MouseEvent) => {
     if (!page || dragging || pageDrag) return;
-    // Clicking a chord makes it the active chord for ALL editing tools — the
-    // external editor below and the dialog paths then describe this chord too.
-    if (page.selected !== id) selectChord(id);
     const local = toChordLocalById(id, e.clientX, e.clientY);
     if (!local) return;
     const c = page.chords.find(cc => cc.id === id);
@@ -680,7 +685,7 @@ export default function App() {
   const onChordBoxDown = (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
     if (e.button !== 0) return;               // left button only
-    if (inlineEdit && tool !== 'select') {    // inline edit: interior clicks EDIT, border/frame clicks MOVE
+    if (inlineEdit && tool !== 'select') {    // inline edit: interior clicks EDIT, border clicks MOVE
       const tgt = e.target as Element | null;
       const onFrame = !!tgt?.closest('.chord-frame');
       if (onFrame) { startChordMove(id, e); return; }   // frame/border → reposition
@@ -730,7 +735,7 @@ export default function App() {
     if (!ref || !pageDrag || !page) return;
     // Cross-page drag: dropping onto ANOTHER visible sheet moves the chord
     // there (Alt held, or pointer inside a different page's bounds).
-    const targetPi = e.altKey ? pageAtClient(e.clientX, e.clientY) : -1;
+    const targetPi = e.altKey ? pageAtClient(e.clientX, e.clientY) : pageIdx;
     if (targetPi >= 0 && targetPi !== pageIdx && pages[targetPi]) {
       const pt = toPageCoordsAt(e.clientX, e.clientY, targetPi);
       if (!Number.isFinite(pt.x)) return;
@@ -746,24 +751,20 @@ export default function App() {
       let ny = snapVal(pt.y - (ref.sy - ref.oy), cfgT);
       nx = Math.max(0, Math.min(Math.max(0, psT.w - nat.w * scale), nx));
       ny = Math.max(0, Math.min(Math.max(0, psT.h - nat.h * scale), ny));
-      setPages(list => {
-        const srcIdx = pageIdxRef.current;
-        const src = list[srcIdx], dst = list[targetPi];
-        if (!src || !dst || src === dst) return list;
+      setPageNoHist(p => {
+        const src = p.pages[pageIdx];
+        const dst = p.pages[targetPi];
+        if (!src || !dst) return p;
         const i = src.chords.findIndex(cc => cc.id === ref.id);
-        if (i < 0) return list;
-        const next = list.slice();
-        const nsrc = structuredClone(src), ndst = structuredClone(dst);
-        const pl = nsrc.placements[ref.id] ?? { x: nx, y: ny, w: nat.w, h: nat.h, scale };
-        const [doc] = nsrc.chords.splice(i, 1);
-        delete nsrc.placements[ref.id];
-        ndst.chords.push(doc);
-        ndst.placements[doc.id] = { ...pl, x: nx, y: ny, w: Math.round(nat.w), h: Math.round(nat.h) };
-        if (nsrc.selected === doc.id) nsrc.selected = nsrc.chords[0]?.id ?? null;
-        ndst.selected = doc.id;
-        next[srcIdx] = nsrc;
-        next[targetPi] = ndst;
-        return next;
+        if (i < 0) return p;
+        const pl = src.placements[ref.id] ?? { x: nx, y: ny, w: nat.w, h: nat.h, scale };
+        const [doc] = src.chords.splice(i, 1);
+        delete src.placements[ref.id];
+        dst.chords.push(doc);
+        dst.placements[doc.id] = { ...pl, x: nx, y: ny, w: Math.round(nat.w), h: Math.round(nat.h) };
+        if (src.selected === doc.id) src.selected = src.chords[0]?.id ?? null;
+        dst.selected = doc.id;
+        return p;
       });
       setPageIdx(targetPi);
       // re-anchor the gesture on the new page so movement continues smoothly
