@@ -1643,6 +1643,7 @@ export default function App() {
               <label className="row check"><input type="checkbox" checked={page.config.landscape} onChange={e => setConfig({ landscape: e.target.checked })} /><span>Landscape</span></label>
               <label className="row check"><input type="checkbox" checked={page.config.showGrid} onChange={e => setConfig({ showGrid: e.target.checked })} /><span>Show grid</span></label>
               <label className="row check"><input type="checkbox" checked={page.config.snap} onChange={e => setConfig({ snap: e.target.checked })} /><span>Snap to grid</span></label>
+              <label className="row check"><input type="checkbox" checked={!page.config.allowOverlap} onChange={e => setConfig({ allowOverlap: !e.target.checked })} /><span>Prevent overlap</span></label>
               <label className="row"><span>Grid (px)</span><input type="number" min={5} max={100} value={page.config.gridSize}
                 onChange={e => setConfig({ gridSize: Math.max(5, Math.min(100, Number(e.target.value) || 20)) })} /></label>
               <div className="page-ops">

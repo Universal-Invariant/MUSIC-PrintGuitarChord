@@ -294,15 +294,17 @@ export const GLOBAL_ONLY_SETTING_KEYS: (keyof Settings)[] = [
 type GlobalOnlyKey = typeof GLOBAL_ONLY_SETTING_KEYS[number];
 
 /** Sanitize one global value (clamped to its UI range; invalid ⇒ app default).
- *  Fractional values keep 2-decimal precision so the fine-control sliders can
- *  reach 0.1 / 0.01 increments exactly. */
+ *  Fractional values keep full precision (board scale snapped to 0.001, shape
+ *  scale to 0.01) so the fine-control sliders can reach 0.1% / 1% increments
+ *  exactly and typed values like "73.5%" survive round-trips. */
 export function sanitizeGlobalValue<K extends GlobalOnlyKey>(k: K, v: unknown): Settings[K] {
   switch (k) {
     case 'boardLengthScale':
     case 'boardWidthScale':
-      return clampBoardScale(v, 1) as Settings[K];
+      return Number(clampBoardScale(v, 1).toFixed(3)) as Settings[K];
     case 'baseDotSize':
-      return clampNum(v, DOT_SIZE_MIN, DOT_SIZE_MAX, DEFAULT_BASE_DOT_SIZE) as Settings[K];
+      // integer px range — dot radius is computed from this in whole pixels
+      return Math.round(clampNum(v, DOT_SIZE_MIN, DOT_SIZE_MAX, DEFAULT_BASE_DOT_SIZE)) as Settings[K];
     case 'shapeScale':
       return (typeof v === 'number' && Number.isFinite(v)
         ? roundStep(clampNum(v, SHAPE_SCALE_MIN, SHAPE_SCALE_MAX, 1), 0.01) : 1) as Settings[K];
