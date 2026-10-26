@@ -42,8 +42,14 @@ function textHitDist(t: TextBox, s: Settings, w: number, h: number, x: number, y
   const anchor = t.anchor ?? 'middle';
   const left = anchor === 'start' ? cx - tw * 0.1 : anchor === 'end' ? cx - tw * 0.9 : cx - tw / 2;
   const dx = x < left ? left - x : x > left + tw ? x - (left + tw) : 0;
-  const dy = Math.abs(y - cy); // vertically centered (dominant-baseline: central)
-  return Math.hypot(dx, dy);
+  // Vertically centered (dominant-baseline: central). Bold/italic widen the
+  // glyphs a bit; an underline adds a stroke ~0.62*size below the center, so
+  // extend the hit box downward to keep it clickable.
+  const halfH = th / 2 + (t.underline && t.text ? size * 0.62 : 0);
+  const dy = y < cy - halfH ? (cy - halfH) - y : y > cy + halfH ? y - (cy + halfH) : 0;
+  const padX = (t.bold ? size * 0.05 : 0) + (t.italic ? size * 0.1 : 0);
+  const ddx = dx === 0 ? 0 : dx + padX;
+  return Math.hypot(ddx, dy);
 }
 
 /** Intrinsic size of a chord SVG (renderSvg embeds data-w / data-h). */
@@ -266,6 +272,10 @@ export default function App() {
   const boardWrapRef = useRef<HTMLDivElement>(null);
   const printRef = useRef<HTMLDivElement>(null);
   const lastClickRef = useRef<{ x: number; y: number; t: number; id?: string } | null>(null);
+  /** Press origin (client px) + moved flag for an item drag started via
+   *  beginItemDrag - lets the release tell a plain CLICK (open dialog) apart
+   *  from a DRAG (reposition silently). */
+  const itemDragPressRef = useRef<{ x: number; y: number; moved: boolean } | null>(null);
   const [patchClip, setPatchClip] = useState<ReturnType<typeof chordPatchFrom> | null>(null);
 
   // ---------- undo / redo (HistoryManager over `pages` + `chords` slices) ----------
@@ -714,8 +724,9 @@ export default function App() {
       // instead of stacking a new one on top of it.
       const existing = pickItemAt(cid, x, y);
       if (existing && existing.kind === 'text') {
-        setSel(existing);
-        setEditing(existing);
+        // Arm a drag-or-edit gesture: moving repositions the box, releasing
+        // without movement opens its edit dialog (see endItemDrag).
+        beginItemDrag(cid, existing, local, { x: e.clientX, y: e.clientY });
         return true;
       }
       const t = newText(es, x / sz.w, y / sz.h);
@@ -839,7 +850,7 @@ export default function App() {
 
   /** Grab an existing dot or text box of chord `id` for dragging. `local` is in
    *  that chord's own canvas space. Returns true when a drag started. */
-  const beginItemDrag = (id: string, s: NonNullable<Sel>, local: { x: number; y: number }): boolean => {
+  const beginItemDrag = (id: string, s: NonNullable<Sel>, local: { x: number; y: number }, client?: { x: number; y: number }): boolean => {
     const ctx = textDragCtx(id);
     if (!ctx) return false;
     if (s.kind === 'text') {
@@ -856,22 +867,27 @@ export default function App() {
     beginDragHistory();          // ONE snapshot for the whole drag gesture
     setDragging(true);
     setSel(s);
+    itemDragPressRef.current = client ? { x: client.x, y: client.y, moved: false } : null;
     return true;
   };
 
   /** Grab a text box of chord `id`. `local` is in that chord's own canvas space.
    *  Returns true when a drag started. */
-  const beginTextDrag = (id: string, local: { x: number; y: number }): boolean => {
+  const beginTextDrag = (id: string, local: { x: number; y: number }, client?: { x: number; y: number }): boolean => {
     const ctx = textDragCtx(id);
     if (!ctx) return false;
     const s = pickItemAt(id, local.x, local.y);
-    if (s && s.kind === 'text') return beginItemDrag(id, s, local);
+    if (s && s.kind === 'text') return beginItemDrag(id, s, local, client);
     return false;
   };
 
-  const applyItemDrag = (local: { x: number; y: number }) => {
+  const applyItemDrag = (local: { x: number; y: number }, client?: { x: number; y: number }) => {
     const ref = dragRef.current;
     if (!ref || !sel) return;
+    // Mark the gesture as MOVED once the pointer travels past a few client px
+    // from where it was pressed - below that it still counts as a click.
+    const press = itemDragPressRef.current;
+    if (press && client && Math.hypot(client.x - press.x, client.y - press.y) > 4) press.moved = true;
     const ctx = textDragCtx(ref.id);
     if (!ctx) return;
     if (ref.kind === 'text') {
@@ -915,20 +931,39 @@ export default function App() {
     });
   };
 
+  /** Finalize an item-drag gesture on release. A text box pressed WITHOUT the
+   *  pointer moving is a plain CLICK -> open its edit dialog; a press that
+   *  moved was a repositioning drag and ends silently. Returns true when an
+   *  item drag was active (so callers can skip their own mouseup logic). */
+  const endItemDrag = (): boolean => {
+    if (!dragging) return false;
+    const ref = dragRef.current;
+    const press = itemDragPressRef.current;
+    itemDragPressRef.current = null;
+    if (ref && ref.kind === 'text' && press && !press.moved) {
+      setEditing({ kind: 'text', id: ref.itemId });   // click (not drag): edit it
+    }
+    endDragHistory();            // re-arm history after the gesture
+    setTimeout(() => setDragging(false), 0);
+    dragRef.current = null;
+    return true;
+  };
+
   const onBoardPointerDown = (e: React.MouseEvent) => {
-    if (tool !== 'select' || !entry) return;
-    beginTextDrag(selectedId!, toBoardCoords(e));
+    if (!entry) return;
+    // With the SELECT tool any text box is grabbable directly. With the TEXT
+    // tool the press was already armed by handleBoardClickLocal (mousedown
+    // fires before click), so do not re-begin it here or we would restart the
+    // gesture with a wrong grab offset.
+    if (tool !== 'select') return;
+    beginTextDrag(selectedId!, toBoardCoords(e), { x: e.clientX, y: e.clientY });
   };
   const onBoardPointerMove = (e: React.MouseEvent) => {
     if (!dragging || !dragRef.current || !sel) return;
-    applyItemDrag(toBoardCoords(e));
+    applyItemDrag(toBoardCoords(e), { x: e.clientX, y: e.clientY });
   };
   const onBoardPointerUp = () => {
-    if (dragging) {
-      endDragHistory();            // re-arm history after the gesture
-      setTimeout(() => setDragging(false), 0);
-    }
-    dragRef.current = null;
+    endItemDrag();
   };
 
   // ---------- inline editing on the page (INLINE EDIT toggle) ----------
@@ -1004,9 +1039,11 @@ export default function App() {
     }
     lastClickRef.current = { x: e.clientX, y: e.clientY, t: now, id };
 
-    // Grab an existing dot (any tool) or text box (select tool) → drag it.
-    if (near && ((near.kind === 'dot') || (tool === 'select' && near.kind === 'text'))) {
-      if (beginItemDrag(id, near, local)) return;
+    // Grab an existing dot (any tool) or text box (select/text tool) -> drag
+    // it. With the TEXT tool this doubles as "click a box to edit it": the
+    // release (endItemDrag) opens the dialog when the pointer never moved.
+    if (near && ((near.kind === 'dot') || ((tool === 'select' || tool === 'text') && near.kind === 'text'))) {
+      if (beginItemDrag(id, near, local, { x: e.clientX, y: e.clientY })) return;
     }
 
     if (tool === 'dot') {
@@ -1137,7 +1174,7 @@ export default function App() {
     if (dragging && dragRef.current && sel) {
       const cid = chordAtClient(e.clientX, e.clientY) ?? dragRef.current.id;
       const local = toChordLocalById(cid, e.clientX, e.clientY);
-      if (local) applyItemDrag(local);
+      if (local) applyItemDrag(local, { x: e.clientX, y: e.clientY });
       return;
     }
     const ref = pageDragRef.current;
@@ -1216,11 +1253,7 @@ export default function App() {
     });
   };
   const onChordBoxUp = () => {
-    if (dragging) {                            // end an inline text-box drag
-      endDragHistory();
-      setTimeout(() => setDragging(false), 0);
-      dragRef.current = null;
-    }
+    if (endItemDrag()) return;                 // finished an inline item drag
     const ref = pageDragRef.current;
     if (pageDrag && ref && page) {
       endDragHistory();
