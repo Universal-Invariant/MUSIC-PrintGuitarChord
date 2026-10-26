@@ -84,6 +84,11 @@ export interface TextBox {
   color: ChordColor;
   rotation?: number | null;
   anchor: 'start' | 'middle' | 'end';
+  /** Per-item text styling. Missing ⇒ normal / not underlined, so every
+   *  legacy document renders exactly as before. */
+  bold?: boolean;
+  italic?: boolean;
+  underline?: boolean;
 }
 
 /** Fingering label drawn beside the nut, for one string. Same inheritance

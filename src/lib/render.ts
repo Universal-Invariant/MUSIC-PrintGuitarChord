@@ -179,8 +179,20 @@ export function renderSvg(doc: ChordDoc, settings: Settings, opts: RenderOpts & 
     const x = t.x * w, y = t.y * h;
     const rot = t.rotation ?? s.defaultTextRotation ?? 0;
     const size = t.size ?? s.defaultTextSize ?? 14;
+    // Per-item styling: bold / italic map to SVG font attributes; underline is
+    // a second line (SVG 1.1 has no text-decoration) offset below the baseline
+    // by roughly one em — matching the extra height used in hit-testing.
+    const fw = t.bold ? ' font-weight="bold"' : '';
+    const fi = t.italic ? ' font-style="italic"' : '';
     parts.push(`<g transform="translate(${x.toFixed(1)},${y.toFixed(1)}) rotate(${rot})">`);
-    parts.push(`<text font-family="${esc(t.font || s.defaultTextFont)}" font-size="${size}" fill="${col(t.color)}" text-anchor="${t.anchor}" dominant-baseline="central">${esc(t.text)}</text>`);
+    parts.push(`<text font-family="${esc(t.font || s.defaultTextFont)}" font-size="${size}" fill="${col(t.color)}" text-anchor="${t.anchor}" dominant-baseline="central"${fw}${fi}>${esc(t.text)}</text>`);
+    if (t.underline && t.text) {
+      const tw = Math.max(size, t.text.length * size * 0.56);
+      const anchor = t.anchor ?? 'middle';
+      const ux = anchor === 'start' ? 0 : anchor === 'end' ? -tw : -tw / 2;
+      const uy = size * 0.62;
+      parts.push(`<line x1="${ux.toFixed(1)}" y1="${uy.toFixed(1)}" x2="${(ux + tw).toFixed(1)}" y2="${uy.toFixed(1)}" stroke="${col(t.color)}" stroke-width="${Math.max(1, size * 0.07).toFixed(2)}" />`);
+    }
     parts.push('</g>');
   }
 
