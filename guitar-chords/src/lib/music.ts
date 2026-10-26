@@ -177,23 +177,36 @@ export function spellPitchClass(pc: number, scale: ScaleInfo): { letter: string;
   return best;
 }
 
-/** Tonal label of a pitch class within a key: '1'..'7' or '#4', 'b6', '#1' … */
-export function tonalLabel(pc: number, scale: ScaleInfo): string {
+/** Tonal label of a pitch class within a key: '1'..'7' or '#4', 'b6', '#1' …
+ *  `preferFlats` is the user's accidental-mode setting: ♭ mode always spells
+ *  altered tones as flats (Eb in F major → b7, never #6), ♯ mode always spells
+ *  them as sharps (D# in B major → #4, never b5). When the preference has no
+ *  candidate to offer (e.g. a note that is only reachable as a flat) we fall
+ *  back to the conventionally correct spelling from the key's lean. */
+export function tonalLabel(pc: number, scale: ScaleInfo, preferFlats?: boolean): string {
   const norm = ((pc % 12) + 12) % 12;
   const exact = scale.degOfPc.get(norm);
   if (exact != null) return String(exact);
   // choose among the two neighbouring diatonic degrees by smallest alteration
-  const cand: { txt: string; dist: number }[] = [];
+  const cand: { txt: string; dist: number; flat: boolean }[] = [];
   for (let d = 1; d <= 7; d++) {
     const scp = scale.pcs[d - 1];
     const up = (((norm - scp) % 12) + 12) % 12;     // raise the degree by `up`
     const dn = (((scp - norm) % 12) + 12) % 12;     // lower it by `dn`
-    if (up === 1) cand.push({ txt: `#${d}`, dist: 1 });
-    if (dn === 1) cand.push({ txt: `b${d}`, dist: 1 });
-    if (up === 2) cand.push({ txt: `##${d}`, dist: 2 });
-    if (dn === 2) cand.push({ txt: `bb${d}`, dist: 2 });
+    if (up === 1) cand.push({ txt: `#${d}`, dist: 1, flat: false });
+    if (dn === 1) cand.push({ txt: `b${d}`, dist: 1, flat: true });
+    if (up === 2) cand.push({ txt: `##${d}`, dist: 2, flat: false });
+    if (dn === 2) cand.push({ txt: `bb${d}`, dist: 2, flat: true });
   }
-  cand.sort((a, b) => a.dist - b.dist);
+  // Score candidates: smallest alteration first, then the user's accidental
+  // mode as a strong tie-breaker (♭ mode prefers flats: Eb in F major → b7,
+  // never #6; ♯ mode prefers sharps: D# in B major → #2, never b3), then the
+  // key's conventional lean.
+  const wantFlat = preferFlats === true ? 1 : preferFlats === false ? -1 : 0;
+  const score = (c: { dist: number; flat: boolean }) =>
+    -c.dist * 10 + (wantFlat !== 0 && c.flat === (wantFlat === 1) ? 3 : 0)
+    + (scale.flatLean && c.flat ? 1 : !scale.flatLean && !c.flat ? 1 : 0);
+  cand.sort((a, b) => score(b) - score(a));
   return cand[0]?.txt ?? '?';
 }
 
@@ -252,7 +265,7 @@ export function computeDotLabel(string: number, absFret: number, ctx: LabelCtx):
   let key = ctx.key ? parseKeyString(ctx.key) : null;
   if (!key) key = { rootPc, minor: false };
   const scale = buildScale(key.rootPc, key.minor);
-  return tonalLabel(pc, scale);
+  return tonalLabel(pc, scale, ctx.preferFlats);
 }
 
 /** Pitch-class of the lowest sounding note of a shape (its conventional root). */
