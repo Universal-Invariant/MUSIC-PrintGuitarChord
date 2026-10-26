@@ -91,7 +91,7 @@ export default function App() {
     // would render and export with an out-of-range size that no slider can
     // produce, until the user happens to touch that control.
     for (const k of GLOBAL_ONLY_SETTING_KEYS) {
-      (s as Record<string, unknown>)[k] = sanitizeGlobalValue(k, s[k]);
+      (s as unknown as Record<string, unknown>)[k] = sanitizeGlobalValue(k, s[k]);
     }
     return s;
   });                                                       // global defaults (sanitized)
