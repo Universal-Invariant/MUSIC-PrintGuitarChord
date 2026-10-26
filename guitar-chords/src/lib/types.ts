@@ -1,5 +1,16 @@
 // ---------- Core data model ----------
 
+/** Fretboard-scale bounds shared by the settings UI, persistence and geometry. */
+export const BOARD_SCALE_MIN = 0.2;
+export const BOARD_SCALE_MAX = 3;
+
+/** Clamp a fretboard scale factor (NaN / missing values fall back to `dflt`). */
+export function clampBoardScale(v: unknown, dflt = 1): number {
+  return typeof v === 'number' && Number.isFinite(v)
+    ? Math.max(BOARD_SCALE_MIN, Math.min(BOARD_SCALE_MAX, v))
+    : dflt;
+}
+
 export interface RGB { r: number; g: number; b: number }
 
 /** Color stored as hex + alpha (0..1). */
@@ -30,32 +41,37 @@ export interface Dot {
   colorIdx: number;  // index into settings.colors
   shapeIdx: number;  // index into active shapes list
   text: string;
-  font: string | null;      // overrides default font
-  textColor: ChordColor | null;
-  textSize: number | null;  // multiplier of baseDotSize
-  transparency: number | null; // 0..1 extra alpha multiplier
-  rotation: number;         // degrees
+  font?: string | null;      // overrides default font (null/missing ⇒ follow the GLOBAL default font)
+  textColor?: ChordColor | null;
+  textSize?: number | null;  // multiplier of baseDotSize
+  transparency?: number | null; // 0..1 extra alpha multiplier
+  rotation?: number;         // degrees
 }
 
-/** Free-floating text box (normalized coordinates 0..1 over whole board). */
+/** Free-floating text box (normalized coordinates 0..1 over whole board).
+ *  font / size / rotation are OPTIONAL: when missing, the item follows the
+ *  GLOBAL text defaults live (changing "Default font / size / rotation" in the
+ *  settings updates every such item on EVERY chord — not just the selected
+ *  one). An explicit value is a per-item override set from the item dialog. */
 export interface TextBox {
   id: string;
   x: number; y: number;
   text: string;
-  font: string;
-  size: number;        // px at scale 1
+  font?: string | null;
+  size?: number | null;      // px at scale 1
   color: ChordColor;
-  rotation: number;
+  rotation?: number | null;
   anchor: 'start' | 'middle' | 'end';
 }
 
-/** Fingering label drawn beside the nut, for one string. */
+/** Fingering label drawn beside the nut, for one string. Same inheritance
+ *  rules as TextBox for `font` and `size`. */
 export interface Fingering {
   id: string;
   string: number;
   text: string;
-  font: string;
-  size: number;
+  font?: string | null;
+  size?: number | null;
   color: ChordColor;
 }
 
@@ -223,8 +239,9 @@ export function clampStartFret(v: number): number {
 // spacing etc., while shared data (color basket, shape list) stays global.
 
 /** The keys that make up the per-chord geometry/appearance patch.
- *  NOTE: boardLengthScale / boardWidthScale are intentionally EXCLUDED —
- *  the fretboard scale is a GLOBAL setting that applies to every chord. */
+ *  NOTE: the GLOBAL_ONLY_SETTING_KEYS below are intentionally EXCLUDED —
+ *  those settings apply to every chord and must never be shadowed by a
+ *  per-chord patch. */
 export const CHORD_SETTING_KEYS: (keyof Settings)[] = [
   'numFrets', 'startFret', 'orientation', 'flipAlong', 'flipAcross',
   'fretSpacing', 'stringGap',
@@ -235,33 +252,156 @@ export const CHORD_SETTING_KEYS: (keyof Settings)[] = [
   'noteLabelMode', 'noteRootPc', 'noteKey', 'octaveMode',
   'openNoteLabels', 'openNoteOffset', 'tuning', 'preferFlats',
   'dotMarkerColor', 'bgFill', 'fretColor', 'stringColor',
-  'baseDotSize', 'shapeScale', 'fretWidthPct', 'defaultTextFont', 'defaultTextColor',
-  'defaultTextSize', 'defaultTextRotation',
+  'fretWidthPct',
 ];
+
+/** Settings that are GLOBAL by design: changing one of them must affect EVERY
+ *  chord on EVERY page (and the saved library), not only the selected chord.
+ *  - fretboard scale (boardLengthScale / boardWidthScale)
+ *  - dot sizing ("Dot base size", "Shape scale")
+ *  - text defaults (font / color / size / rotation)
+ * They are excluded from the per-chord patch, force-overridden at render time
+ * (see applyGlobalSettings) and stripped from legacy stored patches (see
+ * stripGlobalKeysFromChordDocs). */
+export const GLOBAL_ONLY_SETTING_KEYS: (keyof Settings)[] = [
+  'boardLengthScale', 'boardWidthScale',
+  'baseDotSize', 'shapeScale',
+  'defaultTextFont', 'defaultTextColor', 'defaultTextSize', 'defaultTextRotation',
+];
+
+type GlobalOnlyKey = typeof GLOBAL_ONLY_SETTING_KEYS[number];
+
+/** Sanitize one global value (clamped to its UI range; invalid ⇒ app default). */
+function sanitizeGlobalValue<K extends GlobalOnlyKey>(k: K, v: unknown): Settings[K] {
+  switch (k) {
+    case 'boardLengthScale':
+    case 'boardWidthScale':
+      return clampBoardScale(v, 1) as Settings[K];
+    case 'baseDotSize':
+      return (typeof v === 'number' && Number.isFinite(v)
+        ? Math.max(12, Math.min(48, Math.round(v))) : 26) as Settings[K];
+    case 'shapeScale':
+      return (typeof v === 'number' && Number.isFinite(v)
+        ? Math.max(0.4, Math.min(1.6, v)) : 1) as Settings[K];
+    case 'defaultTextSize':
+      return (typeof v === 'number' && Number.isFinite(v)
+        ? Math.max(6, Math.min(60, Math.round(v))) : 14) as Settings[K];
+    case 'defaultTextRotation':
+      return ([0, 90, 180, 270].includes(Number(v)) ? Math.round(Number(v)) : 0) as Settings[K];
+    case 'defaultTextFont':
+      return (typeof v === 'string' && v ? v : 'Arial') as Settings[K];
+    case 'defaultTextColor':
+      return (v && typeof v === 'object' && typeof (v as ChordColor).hex === 'string'
+        ? { ...v } : { hex: '#ffffff', alpha: 1 }) as Settings[K];
+    default:
+      return v as Settings[K];
+  }
+}
+
+/** The GLOBAL values that must win over any per-chord patch, sanitized. */
+function globalOverrideObject(global: Settings): Partial<Settings> {
+  const o: Record<string, unknown> = {};
+  for (const k of GLOBAL_ONLY_SETTING_KEYS) o[k] = sanitizeGlobalValue(k, global[k]);
+  return o as Partial<Settings>;
+}
 
 export type ChordSettingsPatch = Partial<Pick<Settings, typeof CHORD_SETTING_KEYS[number]>>;
 
-/** Extract a full per-chord patch snapshot from a merged Settings object. */
+/** Extract a full per-chord patch snapshot from a merged Settings object.
+ *  Only CHORD_SETTING_KEYS are stored; global-only keys never enter a patch. */
 export function chordPatchFrom(s: Settings): ChordSettingsPatch {
   const out: Record<string, unknown> = {};
   for (const k of CHORD_SETTING_KEYS) out[k] = structuredClone(s[k]);
   return out as ChordSettingsPatch;
 }
 
-/** Merge order: defaults first, patch last (patch wins). */
+/** Merge order: defaults first, patch last (patch wins) — but GLOBAL-only keys
+ *  are then force-overridden from `global`, so they can never be shadowed. */
 export function mergeChordSettings(base: Settings, patch?: Partial<Settings>): Settings {
   if (!patch) return base;
   return { ...base, ...structuredClone(patch) };
 }
 
-/** The fretboard scale is GLOBAL: it always comes from the user's global
- *  settings and overrides any per-chord patch value, so changing it once
- *  affects every chord on every page. */
-export function applyGlobalBoardScale(eff: Settings, global: Settings): Settings {
-  eff.boardLengthScale = global.boardLengthScale;
-  eff.boardWidthScale = global.boardWidthScale;
-  return eff;
+/** The global settings (fretboard scale, dot sizing, text defaults) ALWAYS come
+ *  from the user's global settings and override any per-chord patch value, so
+ *  changing one of them once affects every chord on every page.
+ *  Pure — never mutates its arguments; returns the SAME object when nothing
+ *  has to be overridden (cheap to call inside memos / effects). */
+export function applyGlobalSettings(eff: Settings, global: Settings): Settings {
+  const ov = globalOverrideObject(global);
+  let changed = false;
+  for (const k of GLOBAL_ONLY_SETTING_KEYS) {
+    if (eff[k] !== ov[k]) { changed = true; break; }
+  }
+  return changed ? { ...eff, ...ov } : eff;
 }
+
+/** @deprecated Renamed to applyGlobalSettings (the mechanism now covers more
+ *  than the fretboard scale). Kept as an alias for existing call sites. */
+export const applyGlobalBoardScale = applyGlobalSettings;
+
+/** true ⇒ a chord doc stores stale GLOBAL-only values in its per-chord patch
+ *  (legacy data from before these settings became app-wide). */
+export function chordPatchHasGlobalKeys(c: ChordDoc): boolean {
+  const p = c.settings as Partial<Settings> | undefined;
+  if (!p) return false;
+  return GLOBAL_ONLY_SETTING_KEYS.some(k => k in p);
+}
+
+/** @deprecated Renamed to chordPatchHasGlobalKeys. */
+export const chordPatchHasBoardScale = chordPatchHasGlobalKeys;
+
+/** Strip every GLOBAL-only key out of each chord's per-chord settings patch
+ *  (pages AND the saved library). Iterates over ALL chords, not just the
+ *  selected one, so no chord can keep a stale override that would shadow the
+ *  global sliders. Returns the SAME array instance when nothing needs fixing
+ *  (safe to call from an effect without looping renders). */
+export function stripGlobalKeysFromChordDocs<T extends ChordDoc>(list: T[]): T[] {
+  let changed = false;
+  const out = list.map(c => {
+    if (!chordPatchHasGlobalKeys(c)) return c;
+    changed = true;
+    const p: Record<string, unknown> = { ...(c.settings as Record<string, unknown>) };
+    for (const k of GLOBAL_ONLY_SETTING_KEYS) delete p[k];
+    return { ...c, settings: p as Partial<Settings> };
+  });
+  return changed ? out : list;
+}
+
+/** @deprecated Renamed to stripGlobalKeysFromChordDocs. */
+export const stripBoardScaleFromChordDocs = stripGlobalKeysFromChordDocs;
+
+/** Batch-apply the GLOBAL settings to EVERY chord doc — the "these settings
+ *  effect all created chords" rule. Used when the user changes a global-only
+ *  slider (fretboard scale, dot base size, shape scale) or a text default
+ *  (font / size / rotation): we iterate over all chords and write the new
+ *  values into each chord's own patch, so even chords whose patch previously
+ *  shadowed the key follow the change everywhere (editor, pages, exports,
+ *  print composer and library thumbnails).
+ *  Per-chord items that explicitly override the same property (e.g. a text box
+ *  with its own font/size) keep their override — the batch only syncs the
+ *  chord-level settings.
+ *  Pure per-doc: untouched chords keep their identity; returns the SAME array
+ *  instance when nothing changed (safe inside useEffect dependency loops). */
+export function applyGlobalSettingsToAllChords(list: ChordDoc[], global: Settings): ChordDoc[] {
+  const ov = globalOverrideObject(global);
+  let changed = false;
+  const out = list.map(c => {
+    const prev = c.settings as Partial<Settings> | undefined;
+    let differs = false;
+    for (const k of GLOBAL_ONLY_SETTING_KEYS) {
+      if (!prev || prev[k] !== ov[k]) { differs = true; break; }
+    }
+    if (!differs) return c; // already carries the current global values
+    changed = true;
+    return { ...c, settings: { ...prev, ...ov } as ChordSettingsPatch };
+  });
+  return changed ? out : list;
+}
+
+/** @deprecated Renamed to applyGlobalSettingsToAllChords (covers more keys
+ *  than the fretboard scale now). */
+export const applyBoardScaleToAllChords = applyGlobalSettingsToAllChords;
 
 /** Normalized chord id accessor — old saved data may lack `id`. */
 export function chordId(c: ChordDoc): string {

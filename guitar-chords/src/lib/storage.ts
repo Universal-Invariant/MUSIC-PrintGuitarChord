@@ -1,7 +1,7 @@
 // ---------- Persistence + defaults + export ----------
 
 import type { ChordColor, ChordDoc, ChordPlacement, PageConfig, PageDoc, Settings } from './types';
-import { BLACK, WHITE, uid } from './types';
+import { BLACK, GLOBAL_ONLY_SETTING_KEYS, WHITE, uid } from './types';
 import { STANDARD_SHAPES } from './shapes';
 import { TUNING_HIGH_TO_LOW } from './music';
 
@@ -208,7 +208,7 @@ export function loadChordList(): ChordDoc[] {
 
 /** Ensure a stored object is a well-formed ChordDoc (id, arrays). */
 export function normalizeChord(c: Partial<ChordDoc> & Record<string, unknown>): ChordDoc {
-  return {
+  const out: ChordDoc = {
     id: typeof c.id === 'string' && c.id ? c.id : uid('chord'),
     name: typeof c.name === 'string' ? c.name : 'Untitled',
     dots: Array.isArray(c.dots) ? c.dots : [],
@@ -216,6 +216,15 @@ export function normalizeChord(c: Partial<ChordDoc> & Record<string, unknown>): 
     fingerings: Array.isArray(c.fingerings) ? c.fingerings : [],
     settings: (c.settings && typeof c.settings === 'object') ? c.settings as Partial<Settings> : undefined,
   };
+  // GLOBAL-only settings (fretboard scale, dot sizing, text defaults) must
+  // never be shadowed by a stale per-chord patch — drop them on load so every
+  // chord follows the current global sliders / text defaults.
+  if (out.settings && GLOBAL_ONLY_SETTING_KEYS.some(k => k in out.settings!)) {
+    const p = { ...out.settings } as Record<string, unknown>;
+    for (const k of GLOBAL_ONLY_SETTING_KEYS) delete p[k];
+    out.settings = p as Partial<Settings>;
+  }
+  return out;
 }
 export function saveChordList(list: ChordDoc[]) {
   localStorage.setItem(LS_CHORDS, JSON.stringify(list));

@@ -55,8 +55,9 @@ export default function ItemDialog({ kind, item, settings, customs, onApply, onD
               </select></label>
           </div>
           <div className="shape-preview">{previewShape(shapeList[shapeIdx])}<span>{shapeList[shapeIdx]}</span></div>
-          <label className="row"><span>Text font</span>
-            <select value={draft.font ?? s.defaultTextFont} onChange={e => patch({ font: e.target.value })}>
+          <label className="row"><span>Text font <em style={{ fontWeight: 400, fontSize: 10 }}>(blank = follow global default)</em></span>
+            <select value={draft.font ?? ''} onChange={e => patch({ font: e.target.value === '' ? null : e.target.value })}>
+              <option value="">(global default)</option>
               {FONT_OPTIONS.map(f => <option key={f} value={f} style={{ fontFamily: f }}>{f}</option>)}
             </select></label>
           <div className="two-col">
@@ -77,8 +78,9 @@ export default function ItemDialog({ kind, item, settings, customs, onApply, onD
         {kind === 'text' && <>
           <label className="row"><span>Text</span>
             <input className="txt" value={draft.text ?? ''} onChange={e => patch({ text: e.target.value })} autoFocus /></label>
-          <label className="row"><span>Font</span>
-            <select value={draft.font ?? s.defaultTextFont} onChange={e => patch({ font: e.target.value })}>
+          <label className="row"><span>Font <em style={{ fontWeight: 400, fontSize: 10 }}>(blank = follow global default)</em></span>
+            <select value={draft.font ?? ''} onChange={e => patch({ font: e.target.value === '' ? null : e.target.value })}>
+              <option value="">(global default)</option>
               {FONT_OPTIONS.map(f => <option key={f} value={f} style={{ fontFamily: f }}>{f}</option>)}
             </select></label>
           <div className="two-col">
@@ -88,7 +90,8 @@ export default function ItemDialog({ kind, item, settings, customs, onApply, onD
           </div>
           <div className="two-col">
             <label className="row"><span>Rotation</span>
-              <select value={draft.rotation ?? 0} onChange={e => patch({ rotation: Number(e.target.value) })}>
+              <select value={draft.rotation ?? ''} onChange={e => patch({ rotation: e.target.value === '' ? null : Number(e.target.value) })}>
+                <option value="">(global default)</option>
                 {[0, 90, 180, 270].map(r => <option key={r} value={r}>{r}°</option>)}
               </select></label>
             <label className="row"><span>Align</span>
@@ -104,8 +107,9 @@ export default function ItemDialog({ kind, item, settings, customs, onApply, onD
           <div className="quick-btns">
             {['1', '2', '3', '4', 'T', 'x', '0'].map(t => <button key={t} className="btn small" onClick={() => patch({ text: t })}>{t}</button>)}
           </div>
-          <label className="row"><span>Font</span>
-            <select value={draft.font ?? s.defaultTextFont} onChange={e => patch({ font: e.target.value })}>
+          <label className="row"><span>Font <em style={{ fontWeight: 400, fontSize: 10 }}>(blank = follow global default)</em></span>
+            <select value={draft.font ?? ''} onChange={e => patch({ font: e.target.value === '' ? null : e.target.value })}>
+              <option value="">(global default)</option>
               {FONT_OPTIONS.map(f => <option key={f} value={f} style={{ fontFamily: f }}>{f}</option>)}
             </select></label>
           <div className="two-col">
@@ -127,12 +131,16 @@ export default function ItemDialog({ kind, item, settings, customs, onApply, onD
 }
 
 export function newText(settings: Settings, x: number, y: number): TextBox {
+  // font / size / rotation are LEFT UNSET ⇒ the box follows the GLOBAL text
+  // defaults live (changing them in Settings updates every such box on every
+  // chord). Color still snapshots the default at creation time.
   return {
-    id: uid('txt'), x, y, text: 'Text', font: settings.defaultTextFont,
-    size: settings.defaultTextSize, color: { ...settings.defaultTextColor },
-    rotation: settings.defaultTextRotation, anchor: 'middle',
+    id: uid('txt'), x, y, text: 'Text',
+    color: { ...settings.defaultTextColor },
+    anchor: 'middle',
   };
 }
 export function newFingering(settings: Settings, string: number): Fingering {
-  return { id: uid('fing'), string, text: '1', font: settings.defaultTextFont, size: 15, color: { hex: '#333333', alpha: 1 } };
+  // font unset ⇒ follows the GLOBAL default font live.
+  return { id: uid('fing'), string, text: '1', size: 15, color: { hex: '#333333', alpha: 1 } };
 }
