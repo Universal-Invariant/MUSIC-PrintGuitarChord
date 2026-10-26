@@ -4,11 +4,33 @@
 export const BOARD_SCALE_MIN = 0.2;
 export const BOARD_SCALE_MAX = 3;
 
+/** Slider ranges for the global dot/text sizing controls (shared with the UI). */
+export const DOT_SIZE_MIN = 12;
+export const DOT_SIZE_MAX = 48;
+export const DEFAULT_BASE_DOT_SIZE = 26;
+export const SHAPE_SCALE_MIN = 0.4;
+export const SHAPE_SCALE_MAX = 1.6;
+export const TEXT_SIZE_MIN = 6;
+export const TEXT_SIZE_MAX = 60;
+export const DEFAULT_TEXT_SIZE = 14;
+
 /** Clamp a fretboard scale factor (NaN / missing values fall back to `dflt`). */
 export function clampBoardScale(v: unknown, dflt = 1): number {
   return typeof v === 'number' && Number.isFinite(v)
     ? Math.max(BOARD_SCALE_MIN, Math.min(BOARD_SCALE_MAX, v))
     : dflt;
+}
+
+/** Round a slider value to 2 decimals without float noise (0.1 + 0.2 ⇒ 0.3). */
+export function roundStep(v: number, step = 0.01): number {
+  const q = Math.round(v / step);
+  return +(q * step).toFixed(6);
+}
+
+/** Generic numeric clamp used by the fine-control sliders. */
+export function clampNum(v: unknown, min: number, max: number, dflt: number): number {
+  if (typeof v !== 'number' || !Number.isFinite(v)) return dflt;
+  return Math.max(min, Math.min(max, v));
 }
 
 export interface RGB { r: number; g: number; b: number }
@@ -271,21 +293,21 @@ export const GLOBAL_ONLY_SETTING_KEYS: (keyof Settings)[] = [
 
 type GlobalOnlyKey = typeof GLOBAL_ONLY_SETTING_KEYS[number];
 
-/** Sanitize one global value (clamped to its UI range; invalid ⇒ app default). */
-function sanitizeGlobalValue<K extends GlobalOnlyKey>(k: K, v: unknown): Settings[K] {
+/** Sanitize one global value (clamped to its UI range; invalid ⇒ app default).
+ *  Fractional values keep 2-decimal precision so the fine-control sliders can
+ *  reach 0.1 / 0.01 increments exactly. */
+export function sanitizeGlobalValue<K extends GlobalOnlyKey>(k: K, v: unknown): Settings[K] {
   switch (k) {
     case 'boardLengthScale':
     case 'boardWidthScale':
       return clampBoardScale(v, 1) as Settings[K];
     case 'baseDotSize':
-      return (typeof v === 'number' && Number.isFinite(v)
-        ? Math.max(12, Math.min(48, Math.round(v))) : 26) as Settings[K];
+      return clampNum(v, DOT_SIZE_MIN, DOT_SIZE_MAX, DEFAULT_BASE_DOT_SIZE) as Settings[K];
     case 'shapeScale':
       return (typeof v === 'number' && Number.isFinite(v)
-        ? Math.max(0.4, Math.min(1.6, v)) : 1) as Settings[K];
+        ? roundStep(clampNum(v, SHAPE_SCALE_MIN, SHAPE_SCALE_MAX, 1), 0.01) : 1) as Settings[K];
     case 'defaultTextSize':
-      return (typeof v === 'number' && Number.isFinite(v)
-        ? Math.max(6, Math.min(60, Math.round(v))) : 14) as Settings[K];
+      return clampNum(v, TEXT_SIZE_MIN, TEXT_SIZE_MAX, DEFAULT_TEXT_SIZE) as Settings[K];
     case 'defaultTextRotation':
       return ([0, 90, 180, 270].includes(Number(v)) ? Math.round(Number(v)) : 0) as Settings[K];
     case 'defaultTextFont':
@@ -427,6 +449,10 @@ export interface PageConfig {
   showGrid: boolean;
   snap: boolean;
   gridSize: number;  // px
+  /** true ⇒ chords may be positioned freely, even on top of each other.
+   *  false (default) ⇒ collision detection keeps chord boxes from overlapping.
+   *  Chords always stay inside the page bounds regardless of this flag. */
+  allowOverlap: boolean;
 }
 
 /** A page is a document too — it needs its own stable id (multi-page support). */
@@ -443,19 +469,25 @@ export interface PageDoc {
 /** Resolve a placement's position so it neither leaves the page nor overlaps
  *  any of `others`. Searches outward from the original spot on a step grid and
  *  returns the closest free position (falls back to the clamped original when
- *  the page is full). Pure — does not mutate its arguments. */
+ *  the page is full). Pure — does not mutate its arguments.
+ *  opts.collide = false ⇒ collision detection is DISABLED ("Allow overlap" in
+ *  Page setup): chords may sit freely on top of each other; only the page-bound
+ *  clamp still applies (chords must stay on the page). */
 export function resolveCollision(
   pl: ChordPlacement,
   others: ChordPlacement[],
   page: { w: number; h: number },
-  step = 10,
+  stepOrOpts: number | { step?: number; collide?: boolean } = 10,
 ): ChordPlacement {
+  const opts = typeof stepOrOpts === 'number' ? { step: stepOrOpts } : stepOrOpts;
+  const step = opts.step ?? 10;
+  const collide = opts.collide !== false;
   const rectAt = (x: number, y: number): ChordPlacement => ({
     ...pl,
     x: Math.max(0, Math.min(Math.max(0, page.w - pl.w * pl.scale), x)),
     y: Math.max(0, Math.min(Math.max(0, page.h - pl.h * pl.scale), y)),
   });
-  const collides = (r: ChordPlacement) => others.some(o => placementsOverlap(r, o));
+  const collides = (r: ChordPlacement) => collide && others.some(o => placementsOverlap(r, o));
   if (!collides(pl)) return pl;
   for (let radius = 1; radius <= 60; radius++) {
     let best: ChordPlacement | null = null;

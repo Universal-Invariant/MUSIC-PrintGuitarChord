@@ -106,6 +106,7 @@ export const DEFAULT_PAGE_CONFIG: PageConfig = {
   showGrid: true,
   snap: true,
   gridSize: 20,
+  allowOverlap: false,   // collision detection ON by default
 };
 
 export function emptyPage(name = 'My page'): PageDoc {
@@ -342,6 +343,7 @@ export function normalizePage(p: Partial<PageDoc> & Record<string, unknown>): Pa
     showGrid: cfgIn.showGrid !== false,
     snap: cfgIn.snap !== false,
     gridSize: Math.max(5, Math.min(100, Math.round(num(cfgIn.gridSize, DEFAULT_PAGE_CONFIG.gridSize)))),
+    allowOverlap: cfgIn.allowOverlap === true,   // legacy pages keep collision detection ON
   };
   const chords = Array.isArray(p.chords)
     ? p.chords.filter((c: unknown) => c && typeof c === 'object').map((c: unknown) => normalizeChord(c as Record<string, unknown>))

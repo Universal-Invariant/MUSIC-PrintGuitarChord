@@ -76,8 +76,11 @@ export default function App() {
 
   /** Post-process a page so NO chord box overlaps another. Chords that do are
    *  nudged to the nearest free spot by resolveCollision(). Applied after every
-   *  structural mutation (add / scale / refit / auto-layout / import). */
+   *  structural mutation (add / scale / refit / auto-layout / import).
+   *  Honors the per-page "Allow overlap" flag: when it is checked, collision
+   *  detection is skipped entirely and only page-bound clamping remains. */
   const ensureNoOverlaps = (p: PageDoc): PageDoc => {
+    if (p.config.allowOverlap) return p;
     const ps = pageSizePx(p.config);
     for (const id of Object.keys(p.placements)) {
       const others = Object.entries(p.placements)
@@ -905,15 +908,26 @@ export default function App() {
     x: pl.x, y: pl.y, w: nat.w * pl.scale, h: nat.h * pl.scale, scale: pl.scale,
   });
 
-  /** Find a free top-left position for a nat-sized box on the page (grid-stepped scan). */
+  /** Find a free top-left position for a nat-sized box on the page (grid-stepped scan).
+   *  When the page allows overlaps, chords may be placed anywhere — new chords
+   *  simply cascade diagonally from the margin instead of hunting for a gap. */
   function findFreeSpot(p: PageDoc, nat: { w: number; h: number }): { x: number; y: number } {
     const cfg = p.config;
     const ps = pageSizePx(cfg);
     const bw = Math.min(nat.w, ps.w), bh = Math.min(nat.h, ps.h);
+    const step = Math.max(20, cfg.gridSize);
+    if (cfg.allowOverlap) {
+      // collision detection disabled — place freely (cascade so boxes at least
+      // stay visibly offset), clamped inside the page
+      const off = ((p.chords.length % 8) + 1) * step;
+      return {
+        x: snapVal(Math.max(0, Math.min(ps.w - bw, 20 + off)), cfg),
+        y: snapVal(Math.max(0, Math.min(ps.h - bh, 20 + off)), cfg),
+      };
+    }
     const taken = Object.values(p.placements).map(chordRect);
     const overlaps = (px: number, py: number) =>
       taken.some(t => px < t.x + t.w && px + bw > t.x && py < t.y + t.h && py + bh > t.y);
-    const step = Math.max(20, cfg.gridSize);
     for (let ty = 20; ty + bh <= ps.h; ty += step) {
       for (let tx = 20; tx + bw <= ps.w; tx += step) {
         if (!overlaps(tx, ty)) return { x: snapVal(tx, cfg), y: snapVal(ty, cfg) };
@@ -1070,7 +1084,11 @@ export default function App() {
       // Chords should never sit on top of each other: if the drop position
       // overlaps another box, nudge this one to the nearest free spot.
       // This happens AFTER the gesture ended, so it records its own snapshot.
+      // With "Allow overlap" enabled this pass is skipped entirely — the chord
+      // stays exactly where it was dropped (drag clamping already kept it on
+      // the page).
       setPage(p => {
+        if (p.config.allowOverlap) return p;
         const self = p.placements[ref.id];
         if (!self) return p;
         const others = Object.entries(p.placements)
@@ -1346,6 +1364,7 @@ export default function App() {
         pl.x = Math.max(0, Math.min(Math.max(0, ps.w - nat.w * pl.scale), pl.x));
         pl.y = Math.max(0, Math.min(Math.max(0, ps.h - nat.h * pl.scale), pl.y));
       }
+      if (!p.config.allowOverlap) p = ensureNoOverlaps(p);   // scaled boxes may now collide
       return p;
     });
   };
@@ -1366,6 +1385,7 @@ export default function App() {
         pl.x = Math.max(0, Math.min(Math.max(0, ps.w - nat.w), pl.x));
         pl.y = Math.max(0, Math.min(Math.max(0, ps.h - nat.h), pl.y));
       }
+      if (!p.config.allowOverlap) p = ensureNoOverlaps(p);   // reset boxes may now collide
       return p;
     });
     flash('All chord scales reset to 100%');
