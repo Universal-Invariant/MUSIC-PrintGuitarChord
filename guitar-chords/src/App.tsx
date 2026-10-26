@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as RMouseEvent } from 'react';
 import type { ChordDoc, ChordPlacement, Dot, PageConfig, PageDoc, Settings } from './lib/types';
 import {
-  MIN_NUM_FRETS, chordPatchFrom, clampNumFrets, clampStartFret, fitsPage,
+  MIN_NUM_FRETS, applyGlobalBoardScale, chordPatchFrom, clampNumFrets, clampStartFret, fitsPage,
   mergeChordSettings, pageSizePx, placementsOverlap, resolveCollision, snapVal, uid,
 } from './lib/types';
 import { composePage, cycleColorIndices, cycleShapeIndices, makeDot, renderSvg, svgInner } from './lib/render';
@@ -85,7 +85,7 @@ export default function App() {
 
   // effective settings of the SELECTED chord = global defaults ⊕ its patch
   const eff: Settings = useMemo(
-    () => (entry ? mergeChordSettings(settings, entry.settings) : settings),
+    () => (entry ? applyGlobalBoardScale(mergeChordSettings(settings, entry.settings), settings) : settings),
     [settings, entry],
   );
 
@@ -349,7 +349,7 @@ export default function App() {
     return pages.map(p => {
       const ps = pageSizePx(p.config);
       const chords = p.chords.map(c => {
-        const es = mergeChordSettings(settings, c.settings);
+        const es = applyGlobalBoardScale(mergeChordSettings(settings, c.settings), settings);
         const markup = renderSvg(c, es, { customs });
         const nat = intrinsic(markup);
         const pl = p.placements[c.id] ?? { x: 40, y: 40, w: nat.w, h: nat.h, scale: 1 };
@@ -455,7 +455,7 @@ export default function App() {
     if (!cid || !page) return;
     const doc = page.chords.find(c => c.id === cid);
     if (!doc) return;
-    const es = id && id !== selectedId ? mergeChordSettings(settings, doc.settings) : eff;
+    const es = id && id !== selectedId ? applyGlobalBoardScale(mergeChordSettings(settings, doc.settings), settings) : eff;
     const existing = doc.dots.find(d => d.string === hit.string && d.fret - es.startFret === hit.rel);
     const cycleColor = cycleColorIndices(es);
     const cycleShape = cycleShapeIndices(es);
@@ -523,7 +523,7 @@ export default function App() {
     if (!cid || !page) return false;
     const doc = page.chords.find(c => c.id === cid);
     if (!doc) return false;
-    const es = id && id !== selectedId ? mergeChordSettings(settings, doc.settings) : eff;
+    const es = id && id !== selectedId ? applyGlobalBoardScale(mergeChordSettings(settings, doc.settings), settings) : eff;
     const sz = id && id !== selectedId ? canvasSize(es) : size;
     const { x, y } = local;
     const hit = hitTest(es, x, y);
@@ -619,7 +619,7 @@ export default function App() {
     if (!page) return null;
     const doc = id === selectedId && entry ? entry : page.chords.find(c => c.id === id) ?? null;
     if (!doc) return null;
-    const es = mergeChordSettings(settings, doc.settings);
+    const es = applyGlobalBoardScale(mergeChordSettings(settings, doc.settings), settings);
     const sz = id === selectedId ? size : canvasSize(es);
     return { doc, w: sz.w, h: sz.h };
   };
@@ -628,7 +628,7 @@ export default function App() {
   const pickItemAt = (id: string, x: number, y: number): Sel => {
     const ctx = textDragCtx(id);
     if (!ctx) return null;
-    const es = mergeChordSettings(settings, ctx.doc.settings);
+    const es = applyGlobalBoardScale(mergeChordSettings(settings, ctx.doc.settings), settings);
     let best: { d: number; sel: Sel } = { d: 26, sel: null };
     for (const d of ctx.doc.dots) {
       // dots snap to fret slots while dragging, so compare against the slot's
@@ -662,7 +662,7 @@ export default function App() {
     } else if (s.kind === 'dot') {
       const d = ctx.doc.dots.find(dd => dd.id === s.id);
       if (!d) return false;
-      const es = mergeChordSettings(settings, ctx.doc.settings);
+      const es = applyGlobalBoardScale(mergeChordSettings(settings, ctx.doc.settings), settings);
       const c = cellCenter(es, d.string, dotAlongFret(es, d.fret - es.startFret, fretPositions(es)));
       dragRef.current = { id, kind: 'dot', itemId: d.id, dx: local.x - c.x, dy: local.y - c.y };
     } else return false;
@@ -700,7 +700,7 @@ export default function App() {
     }
     // DOT drag: live-drag through the board matrix, then SNAP to the nearest
     // string + fret slot (open zone included) — same semantics as clicking.
-    const es = mergeChordSettings(settings, ctx.doc.settings);
+    const es = applyGlobalBoardScale(mergeChordSettings(settings, ctx.doc.settings), settings);
     const strings = stringLayout(es);
     let strIdx = 0, bestA = Infinity;
     for (let i = 0; i < NUM_STRINGS; i++) {
@@ -800,7 +800,7 @@ export default function App() {
     if (!local) return;
     const c = page.chords.find(cc => cc.id === id);
     if (!c) return;
-    const es = mergeChordSettings(settings, c.settings);
+    const es = applyGlobalBoardScale(mergeChordSettings(settings, c.settings), settings);
 
     // Resolve WHICH item sits under the cursor BEFORE deciding the gesture —
     // grabbing an existing dot/text must always win over "add a new dot",
@@ -920,7 +920,7 @@ export default function App() {
     // used to poison the clamp math and freeze chords (the FIRST one) in place.
     const c = page.chords.find(cc => cc.id === id);
     if (!c) return;
-    const es = mergeChordSettings(settings, c.settings);
+    const es = applyGlobalBoardScale(mergeChordSettings(settings, c.settings), settings);
     const nat = canvasSize(es);
     let pl = page.placements[id];
     if (!pl) {
@@ -960,7 +960,7 @@ export default function App() {
       const psT = pageSizePx(cfgT);
       const c = pg.chords.find(cc => cc.id === ref.id);
       if (!c) return;
-      const es = mergeChordSettings(settings, c.settings);
+      const es = applyGlobalBoardScale(mergeChordSettings(settings, c.settings), settings);
       const nat = canvasSize(es);
       const cur = pg.placements[ref.id];
       const scale = cur?.scale ?? 1;
@@ -1001,7 +1001,7 @@ export default function App() {
     // fresh native size (never trust stored w/h during the drag)
     const c = pg.chords.find(cc => cc.id === ref.id);
     if (!c) return;
-    const es = mergeChordSettings(settings, c.settings);
+    const es = applyGlobalBoardScale(mergeChordSettings(settings, c.settings), settings);
     const nat = canvasSize(es);
     // DELTA-based movement through the SHARED page CTM: grab offset
     // (ox - sx) is added to the pointer's CURRENT page-space position. Both
@@ -1149,7 +1149,7 @@ export default function App() {
     for (const f of c.fingerings) f.id = uid('fing');
     if (!opts.patch) c.settings = undefined; // inherit current global defaults
     setPage(p => {
-      const es = mergeChordSettings(settings, c.settings);
+      const es = applyGlobalBoardScale(mergeChordSettings(settings, c.settings), settings);
       const nat = intrinsic(renderSvg(c, es, { customs }));
       // find a free spot so new chords never land on top of existing ones
       const { x, y } = findFreeSpot(p, nat);
@@ -1231,7 +1231,7 @@ export default function App() {
     while (chords.some(c => c.name === name)) name = `${base} (${n++})`;
     pushLibHistory();
     for (const c of page.chords) {
-      const rec: ChordDoc = { ...structuredClone(c), name: `${name} · ${c.name}`, settings: c.settings ?? chordPatchFrom(mergeChordSettings(settings, c.settings)) };
+      const rec: ChordDoc = { ...structuredClone(c), name: `${name} · ${c.name}`, settings: c.settings ?? chordPatchFrom(applyGlobalBoardScale(mergeChordSettings(settings, c.settings), settings)) };
       setChords(list => [...list, rec]);
     }
     flash(`Saved ${page.chords.length} chords as “${name}” set`);
@@ -1260,7 +1260,7 @@ export default function App() {
     pushHistory();
     setPage(p => {
       for (const c of p.chords) {
-        const es = mergeChordSettings(settings, c.settings);
+        const es = applyGlobalBoardScale(mergeChordSettings(settings, c.settings), settings);
         const nat = canvasSize(es);
         let pl = p.placements[c.id] ?? { x: 20, y: 20, w: Math.round(nat.w), h: Math.round(nat.h), scale: 1 };
         // legacy fix-up: stored w/h ≈ nat*scale ⇒ they were pre-multiplied → divide out
@@ -1295,7 +1295,7 @@ export default function App() {
     const ps = pageSizePx(page.config);
     setPage(p => {
       for (const c of p.chords) {
-        const es = mergeChordSettings(settings, c.settings);
+        const es = applyGlobalBoardScale(mergeChordSettings(settings, c.settings), settings);
         const nat = canvasSize(es);
         const pl = p.placements[c.id];
         if (!pl) continue;
@@ -1315,7 +1315,7 @@ export default function App() {
     const ps = pageSizePx(page.config);
     setPage(p => {
       for (const c of p.chords) {
-        const es = mergeChordSettings(settings, c.settings);
+        const es = applyGlobalBoardScale(mergeChordSettings(settings, c.settings), settings);
         const nat = canvasSize(es);
         const pl = p.placements[c.id];
         if (!pl) continue;
@@ -1336,7 +1336,7 @@ export default function App() {
     const ps = pageSizePx(page.config);
     const margin = 24, gap = 18;
     const items = page.chords.map(c => {
-      const es = mergeChordSettings(settings, c.settings);
+      const es = applyGlobalBoardScale(mergeChordSettings(settings, c.settings), settings);
       const markup = renderSvg(c, es, { customs });
       const nat = intrinsic(markup);
       return { entry: c, pl: page.placements[c.id] ?? { x: 0, y: 0, w: nat.w, h: nat.h, scale: 1 }, markup, iw: nat.w, ih: nat.h };
@@ -1379,7 +1379,7 @@ export default function App() {
     if (!page) return '';
     const ps = pageSizePx(page.config);
     return composePage(ps, page.chords.map(c => {
-      const es = mergeChordSettings(settings, c.settings);
+      const es = applyGlobalBoardScale(mergeChordSettings(settings, c.settings), settings);
       const markup = renderSvg(c, es, { customs });
       const pl = page.placements[c.id] ?? { x: 40, y: 40, w: 0, h: 0, scale: 1 };
       return { id: c.id, x: pl.x, y: pl.y, scale: pl.scale, markup };
@@ -1805,6 +1805,8 @@ export default function App() {
             <SettingsPanel
               settings={hasSel ? eff : settings}
               onChange={(next) => { if (hasSel) setEff(next); else setSettings(next); }}
+              globalSettings={settings}
+              onGlobalChange={setSettings}
               customs={customs} onCustomsChange={setCustoms}
               chordMode={hasSel}
               extraActions={hasSel ? (
