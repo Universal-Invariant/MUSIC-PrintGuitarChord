@@ -172,10 +172,15 @@ export function renderSvg(doc: ChordDoc, settings: Settings, opts: RenderOpts & 
   }
 
   // ----- free text boxes -----
+  // font / size / rotation are resolved AT DRAW TIME: an item without an
+  // explicit value follows the GLOBAL text defaults, so changing those
+  // settings updates every such box on EVERY chord — not just the selected one.
   for (const t of doc.texts) {
     const x = t.x * w, y = t.y * h;
-    parts.push(`<g transform="translate(${x.toFixed(1)},${y.toFixed(1)}) rotate(${t.rotation})">`);
-    parts.push(`<text font-family="${esc(t.font)}" font-size="${t.size}" fill="${col(t.color)}" text-anchor="${t.anchor}" dominant-baseline="central">${esc(t.text)}</text>`);
+    const rot = t.rotation ?? s.defaultTextRotation ?? 0;
+    const size = t.size ?? s.defaultTextSize ?? 14;
+    parts.push(`<g transform="translate(${x.toFixed(1)},${y.toFixed(1)}) rotate(${rot})">`);
+    parts.push(`<text font-family="${esc(t.font || s.defaultTextFont)}" font-size="${size}" fill="${col(t.color)}" text-anchor="${t.anchor}" dominant-baseline="central">${esc(t.text)}</text>`);
     parts.push('</g>');
   }
 
@@ -273,8 +278,10 @@ function renderOpenMarkers(doc: ChordDoc, s: Settings, P: (t: number, a: number)
 function renderFingerings(doc: ChordDoc, s: Settings): string {
   const out: string[] = [];
   for (const f of doc.fingerings) {
+    // font/size resolved at draw time — missing ⇒ follow the GLOBAL text defaults
     const p = fingeringPos(s, f.string);
-    out.push(`<text x="${p.x.toFixed(1)}" y="${p.y.toFixed(1)}" font-family="${esc(f.font)}" font-size="${f.size}" fill="${col(f.color)}" text-anchor="${p.anchor}" dominant-baseline="central">${esc(f.text)}</text>`);
+    const size = f.size ?? s.defaultTextSize ?? 14;
+    out.push(`<text x="${p.x.toFixed(1)}" y="${p.y.toFixed(1)}" font-family="${esc(f.font || s.defaultTextFont)}" font-size="${size}" fill="${col(f.color)}" text-anchor="${p.anchor}" dominant-baseline="central">${esc(f.text)}</text>`);
   }
   return out.join('');
 }
@@ -374,10 +381,19 @@ export function makeDot(s: Settings, string: number, rel: number): Dot {
     colorIdx: 0,
     shapeIdx: 0,
     text: '',
-    font: null,
-    textColor: null,
-    textSize: null,
+    font: null,        // null ⇒ follow the GLOBAL default font live
+    textColor: null,   // null ⇒ follow the dot pitch-label color live
+    textSize: null,    // null ⇒ exactly `baseDotSize` (GLOBAL "Dot base size")
     transparency: null,
     rotation: 0, // shape glyphs start upright; defaultTextRotation applies to TEXT items only
   };
+}
+
+/** true ⇒ a stored item carries NO explicit text styling — it should follow the
+ *  GLOBAL text defaults (font / size / rotation) live. Used by the load-time
+ *  migration to drop baked-in values from legacy saves so the global settings
+ *  can reach every existing chord. An item that was explicitly customized in
+ *  its dialog keeps its own values (per-item override). */
+export function itemFollowsGlobalFont(it: { font?: string | null }): boolean {
+  return it.font == null || it.font === '';
 }

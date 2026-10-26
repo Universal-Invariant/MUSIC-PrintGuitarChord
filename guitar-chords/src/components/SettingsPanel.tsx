@@ -34,6 +34,10 @@ export default function SettingsPanel({ settings, onChange, customs, onCustomsCh
   // sliders write to the app-wide settings so all boards resize together.
   const gs = globalSettings ?? s;
   const setGlobal = (patch: Partial<Settings>) => (onGlobalChange ?? onChange)({ ...gs, ...patch });
+  // Read a GLOBAL-only value from the true global settings even while the
+  // panel shows a chord's merged view (those keys are force-overridden by the
+  // globals anyway — see applyGlobalSettings).
+  const gOf = <K extends keyof Settings>(k: K): Settings[K] => (gs[k] ?? s[k]) as Settings[K];
   const setColor = (key: keyof Settings, c: ChordColor) => set({ [key]: c } as Partial<Settings>);
 
   // --- color basket helpers ---
@@ -304,23 +308,25 @@ export default function SettingsPanel({ settings, onChange, customs, onCustomsCh
           {svgErr && <div className="err">{svgErr}</div>}
           <button className="btn small" onClick={addCustomShape}>Add shape</button>
         </fieldset>
-        <label className="row"><span>Dot base size (px)</span>
-          <input type="range" min={12} max={48} value={s.baseDotSize} onChange={e => set({ baseDotSize: Number(e.target.value) })} /></label>
-        <label className="row"><span>Shape scale</span>
-          <input type="range" min={0.4} max={1.6} step={0.05} value={s.shapeScale} onChange={e => set({ shapeScale: Number(e.target.value) })} /></label>
+        <label className="row"><span>Dot base size (px) <em style={{ fontWeight: 400, fontSize: 10 }}>(global — all chords)</em></span>
+          <input type="range" min={12} max={48} value={gOf('baseDotSize')} onChange={e => setGlobal({ baseDotSize: Math.max(12, Math.min(48, Math.round(Number(e.target.value) || 12))) })} /></label>
+        <label className="row"><span>Shape scale <em style={{ fontWeight: 400, fontSize: 10 }}>(global — all chords)</em></span>
+          <input type="range" min={0.4} max={1.6} step={0.05} value={gOf('shapeScale')} onChange={e => setGlobal({ shapeScale: Math.max(0.4, Math.min(1.6, Number(e.target.value) || 1)) })} /></label>
+        <div className="mini-note">These two are GLOBAL: every note dot on EVERY chord resizes together — the change is pushed to all created chords immediately.</div>
         <ColorPicker label="Shape default color" compact value={s.shapeDefaultColor} onChange={c => setColor('shapeDefaultColor', c)} />
       </Section>
 
       <Section title="Text">
-        <label className="row"><span>Default font</span>
-          <select value={s.defaultTextFont} onChange={e => set({ defaultTextFont: e.target.value })}>
+        <div className="mini-note">Font, size and rotation are GLOBAL defaults: items that don't carry their own override follow them live on EVERY chord (the change is pushed to all created chords). Color stays a default for newly added text.</div>
+        <label className="row"><span>Default font <em style={{ fontWeight: 400, fontSize: 10 }}>(global — all chords)</em></span>
+          <select value={gOf('defaultTextFont')} onChange={e => setGlobal({ defaultTextFont: e.target.value })}>
             {FONT_OPTIONS.map(f => <option key={f} value={f} style={{ fontFamily: f }}>{f}</option>)}
           </select></label>
-        <label className="row"><span>Default text size (px)</span>
-          <input type="number" min={6} max={60} value={s.defaultTextSize} onChange={e => set({ defaultTextSize: Number(e.target.value) })} /></label>
-        <ColorPicker label="Default text color" compact value={s.defaultTextColor} onChange={c => setColor('defaultTextColor', c)} />
-        <label className="row"><span>Default text rotation</span>
-          <select value={s.defaultTextRotation} onChange={e => set({ defaultTextRotation: Number(e.target.value) })}>
+        <label className="row"><span>Default text size (px) <em style={{ fontWeight: 400, fontSize: 10 }}>(global — all chords)</em></span>
+          <input type="number" min={6} max={60} value={gOf('defaultTextSize')} onChange={e => setGlobal({ defaultTextSize: Math.max(6, Math.min(60, Math.round(Number(e.target.value) || 6))) })} /></label>
+        <ColorPicker label="Default text color" compact value={gs.defaultTextColor ?? s.defaultTextColor} onChange={c => setGlobal({ defaultTextColor: c })} />
+        <label className="row"><span>Default text rotation <em style={{ fontWeight: 400, fontSize: 10 }}>(global — all chords)</em></span>
+          <select value={gOf('defaultTextRotation')} onChange={e => setGlobal({ defaultTextRotation: Number(e.target.value) })}>
             {[0, 90, 180, 270].map(r => <option key={r} value={r}>{r}°</option>)}
           </select></label>
       </Section>

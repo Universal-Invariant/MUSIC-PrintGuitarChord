@@ -24,7 +24,7 @@
 //    never extend past the starting fret line nor past the last fret line.
 
 import type { Settings } from './types';
-import { nutShown } from './types';
+import { BOARD_SCALE_MAX, BOARD_SCALE_MIN, nutShown } from './types';
 
 export const NUM_STRINGS = 6;
 export const FING_BAND = 46;   // reserved band for fingering labels (opposite the nut)
@@ -47,11 +47,11 @@ function boardAcrossBase(s: Settings): number {
  *  stay exact while fonts, dot glyphs and stroke widths are never distorted. */
 export function lengthScale(s: Settings): number {
   const v = s.boardLengthScale;
-  return Number.isFinite(v) && v > 0 ? Math.max(0.2, Math.min(3, v)) : 1;
+  return Number.isFinite(v) && v > 0 ? Math.max(BOARD_SCALE_MIN, Math.min(BOARD_SCALE_MAX, v)) : 1;
 }
 export function widthScale(s: Settings): number {
   const v = s.boardWidthScale;
-  return Number.isFinite(v) && v > 0 ? Math.max(0.2, Math.min(3, v)) : 1;
+  return Number.isFinite(v) && v > 0 ? Math.max(BOARD_SCALE_MIN, Math.min(BOARD_SCALE_MAX, v)) : 1;
 }
 
 /** Board width across strings (scaled to actual board units). */

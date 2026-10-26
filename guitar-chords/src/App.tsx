@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as RMouseEvent } from 'react';
 import type { ChordDoc, ChordPlacement, Dot, PageConfig, PageDoc, Settings } from './lib/types';
 import {
-  MIN_NUM_FRETS, applyGlobalBoardScale, chordPatchFrom, clampNumFrets, clampStartFret, fitsPage,
-  mergeChordSettings, pageSizePx, placementsOverlap, resolveCollision, snapVal, uid,
+  GLOBAL_ONLY_SETTING_KEYS, MIN_NUM_FRETS, applyGlobalBoardScale, applyGlobalSettingsToAllChords,
+  chordPatchFrom, clampNumFrets, clampStartFret, fitsPage,
+  mergeChordSettings, pageSizePx, placementsOverlap, resolveCollision, snapVal, stripGlobalKeysFromChordDocs, uid,
 } from './lib/types';
 import { composePage, cycleColorIndices, cycleShapeIndices, makeDot, renderSvg, svgInner } from './lib/render';
 import {
@@ -31,6 +32,13 @@ function intrinsic(markup: string): { w: number; h: number } {
 
 const jsonSnap = (v: unknown) => JSON.parse(JSON.stringify(v));
 
+/** Snapshot of the GLOBAL-only settings (fretboard scale, dot sizing, text
+ *  defaults) used as an effect key — fires only when one of THOSE values
+ *  actually changes, not on every unrelated settings edit. */
+function globalOnlyKey(s: Settings): string {
+  return GLOBAL_ONLY_SETTING_KEYS.map(k => JSON.stringify(s[k])).join('|');
+}
+
 export default function App() {
   // ---------- persisted state ----------
   const [settings, setSettings] = useState<Settings>(() => loadSettings());          // global defaults
@@ -53,6 +61,7 @@ export default function App() {
   });
 
   useEffect(() => { saveSettings(settings); }, [settings]);
+  const settingsRef = useRef(settings); useEffect(() => { settingsRef.current = settings; }, [settings]);
   useEffect(() => { saveCustomShapes(customs); }, [customs]);
   useEffect(() => { saveChordList(chords); }, [chords]);
   useEffect(() => { savePages(pages); }, [pages]);
@@ -88,6 +97,38 @@ export default function App() {
     () => (entry ? applyGlobalBoardScale(mergeChordSettings(settings, entry.settings), settings) : settings),
     [settings, entry],
   );
+
+  // ---------- GLOBAL settings propagate to EVERY chord ----------
+  // The fretboard scale, dot sizing ("Dot base size", "Shape scale") and text
+  // defaults (font / color / size / rotation) are app-wide: changing one of
+  // them must affect ALL created chords — every page AND the saved library —
+  // not just the selected one. We iterate over all chord docs and sync the
+  // current global values into each chord's own settings patch.
+  //   • keyed on a snapshot of ONLY the global-only keys, so unrelated
+  //     settings edits never trigger it;
+  //   • the helpers return the SAME array instance when nothing changed, so
+  //     this can never loop renders;
+  //   • legacy patches that still shadow these keys are stripped as part of
+  //     the same pass (the synced values overwrite them anyway).
+  const globalOnlyKeyStr = globalOnlyKey(settings);
+  useEffect(() => {
+    setPages(list => {
+      let changed = false;
+      const out = list.map(p => {
+        const nextChords = applyGlobalSettingsToAllChords(
+          stripGlobalKeysFromChordDocs(p.chords), settingsRef.current);
+        if (nextChords === p.chords) return p;
+        changed = true;
+        return { ...p, chords: nextChords };
+      });
+      return changed ? out : list;
+    });
+    setChords(list => {
+      const next = applyGlobalSettingsToAllChords(stripGlobalKeysFromChordDocs(list), settingsRef.current);
+      return next === list ? list : next;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [globalOnlyKeyStr]);
 
   // ---------- editing state ----------
   const [tool, setTool] = useState<Tool>('dot');
