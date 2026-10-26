@@ -109,6 +109,17 @@ export default function ItemDialog({ kind, item, settings, customs, onApply, onD
                 <option value="start">Left</option><option value="middle">Center</option><option value="end">Right</option>
               </select></label>
           </div>
+          {/* Per-item text styling — B/I/U toggles (missing ⇒ normal, legacy
+              documents render unchanged). Rendered by lib/render.ts as SVG
+              font-weight / font-style attributes + an underline stroke. */}
+          <div className="quick-btns" style={{ marginBottom: 6 }}>
+            <button className={`btn small${draft.bold ? ' primary' : ''}`} title="Bold"
+              onClick={() => patch({ bold: draft.bold ? undefined : true })}><b>B</b></button>
+            <button className={`btn small${draft.italic ? ' primary' : ''}`} title="Italic"
+              onClick={() => patch({ italic: draft.italic ? undefined : true })}><i>I</i></button>
+            <button className={`btn small${draft.underline ? ' primary' : ''}`} title="Underline"
+              onClick={() => patch({ underline: draft.underline ? undefined : true })}><u>U</u></button>
+          </div>
         </>}
 
         {kind === 'fing' && <>

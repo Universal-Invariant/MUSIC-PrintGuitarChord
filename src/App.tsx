@@ -756,10 +756,15 @@ export default function App() {
   const pageView = renderedPages[pageIdx] ?? null;
 
   // ---------- coordinate helpers ----------
-  const toBoardCoords = (e: { clientX: number; clientY: number }) => {
+  const toBoardCoords = (e: { clientX: number; clientY: number }): { x: number; y: number } | null => {
+    // Returns null when the board SVG can't be measured. Callers MUST bail on
+    // null: previously this fell back to {x:0,y:0}, so a drag whose pointer
+    // left the board mid-gesture received "local" (0,0) and teleported the
+    // grabbed item to the board's top-left corner (looked off-screen).
     const el = boardWrapRef.current?.querySelector('svg');
-    if (!el) return { x: 0, y: 0 };
+    if (!el) return null;
     const rect = el.getBoundingClientRect();
+    if (!(rect.width > 0)) return null;
     const scale = rect.width / size.w;
     return { x: (e.clientX - rect.left) / scale, y: (e.clientY - rect.top) / scale };
   };
