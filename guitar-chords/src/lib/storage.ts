@@ -40,6 +40,8 @@ export const DEFAULT_SETTINGS: Settings = {
   flipAcross: false,
   fretSpacing: 46,
   stringGap: 36,
+  boardLengthScale: 1,
+  boardWidthScale: 1,
   stringWidthMode: 'progressive',
   minStringWidth: 1.2,
   maxStringWidth: 3.6,
@@ -263,6 +265,11 @@ export function loadSettings(): Settings {
     if (typeof merged.numFrets === 'number') merged.numFrets = Math.max(3, Math.min(27, Math.round(merged.numFrets)));
     if (typeof merged.fretThickness !== 'number' || !Number.isFinite(merged.fretThickness)) merged.fretThickness = DEFAULT_SETTINGS.fretThickness;
     merged.fretThickness = Math.max(0.5, Math.min(12, merged.fretThickness));
+    // board rectangle scaling (coordinate-space, applied before rendering)
+    const clampScale = (v: unknown, d: number) =>
+      (typeof v === 'number' && Number.isFinite(v) ? Math.max(0.2, Math.min(3, v)) : d);
+    merged.boardLengthScale = clampScale(merged.boardLengthScale, DEFAULT_SETTINGS.boardLengthScale);
+    merged.boardWidthScale = clampScale(merged.boardWidthScale, DEFAULT_SETTINGS.boardWidthScale);
     // real guitar geometry: the last slot can never be wider than the first one
     if (typeof merged.lastFretSize === 'number' && typeof merged.firstFretSize === 'number') {
       merged.lastFretSize = Math.min(merged.lastFretSize, merged.firstFretSize);

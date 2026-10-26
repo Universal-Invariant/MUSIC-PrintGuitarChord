@@ -7,7 +7,7 @@ import {
 import { composePage, cycleColorIndices, cycleShapeIndices, makeDot, renderSvg, svgInner } from './lib/render';
 import {
   NUM_STRINGS, canvasSize, cellCenter, dotAlongFret, fingeringPos, fretPositions, hitTest,
-  nutZoneDepth, project, stringLayout, unproject,
+  lengthScale, nutZoneDepth, project, stringLayout, unproject, widthScale,
 } from './lib/geometry';
 import {
   chordFromLibrary, duplicatePage, emptyChord, emptyPage, exportRaster, exportSvg,
@@ -780,7 +780,7 @@ export default function App() {
   /** Nearest existing dot to a cell center (within ~1.3 slots) — click-to-remove. */
   const findNearestDotToCell = (c: ChordDoc, es: Settings, string: number, rel: number): Dot | undefined => {
     const target = cellCenter(es, string, rel);
-    let best: Dot | undefined; let bd = es.stringGap * 1.3;
+    let best: Dot | undefined; let bd = es.stringGap * widthScale(es) * 1.3;
     for (const d of c.dots) {
       const dr = d.fret - es.startFret;
       const cc = cellCenter(es, d.string, dr);
