@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as RMouseEvent } from 'react';
 import type { ChordDoc, ChordPlacement, Dot, PageConfig, PageDoc, Settings } from './lib/types';
 import {
   MIN_NUM_FRETS, chordPatchFrom, clampNumFrets, clampStartFret, fitsPage,
@@ -200,6 +200,116 @@ export default function App() {
       return p;
     });
   }, [selectedId, setPage, pushHistory]);
+
+  /** Quick-settings variant: patch ONLY the given fields of the selected
+   *  chord's effective settings (everything else stays untouched). */
+  const setEffPatch = useCallback((patch: Partial<Settings>) => {
+    setEff({ ...eff, ...patch });
+  }, [setEff, eff]);
+
+  // ---------- quick note-label helpers (toolbar in the chord editor) ----------
+  /** Add every octave of EVERY pitch class currently sounding on the board
+   *  that fits inside the visible fret range (positions outside are clipped). */
+  const fillAllOctaves = () => {
+    if (!entry) return;
+    pushHistory();
+    mutate(d => {
+      const pcs = shapePitchClasses(d.dots, eff.tuning);
+      for (const pos of enumerateOctavePositions(pcs, d.dots, eff)) {
+        d.dots.push(makeDot(eff, pos.string, pos.fret - eff.startFret));
+      }
+      return d;
+    });
+  };
+
+  /** Remove every dot whose pitch-class octave twin already exists elsewhere,
+   *  keeping the lowest-fret representative of each pitch class. This is the
+   *  inverse of octave-fill (safe to run even when nothing needs removing). */
+  const dedupeOctaves = () => {
+    if (!entry) return;
+    pushHistory();
+    mutate(d => {
+      const byPc = new Map<number, typeof d.dots>();
+      for (const dot of d.dots) {
+        const m = (eff.tuning[dot.string] ?? 64) + Math.max(0, dot.fret);
+        const pc = ((m % 12) + 12) % 12;
+        const arr = byPc.get(pc) ?? [];
+        arr.push(dot);
+        byPc.set(pc, arr);
+      }
+      const keep = new Set<string>();
+      for (const arr of byPc.values()) {
+        arr.sort((a, b) => a.fret - b.fret || a.string - b.string);
+        keep.add(arr[0].id);           // always keep the lowest representative
+      }
+      d.dots = d.dots.filter(dot => keep.has(dot.id));
+      return d;
+    });
+  };
+
+  /** Cycle the tonal/interval reference key: auto → F → Bb → Eb → Ab → Db → G → C. */
+  const KEY_CYCLE = ['', 'F', 'Bb', 'Eb', 'Ab', 'Db', 'Gb', 'C', 'G'];
+  const cycleKey = () => {
+    const cur = eff.noteKey.trim();
+    let i = KEY_CYCLE.indexOf(cur);
+    if (i < 0) i = 0;
+    const next = KEY_CYCLE[(i + 1) % KEY_CYCLE.length];
+    setEffPatch({ noteKey: next });
+    flash(next ? `Key: ${next}` : 'Key: auto (root of shape)');
+  };
+
+  /** Cycle the tonal spelling preference: sharps → flats. */
+  const cycleAccidental = () => {
+    setEffPatch({ preferFlats: !eff.preferFlats });
+    flash(eff.preferFlats ? 'Spelling: ♯ sharps' : 'Spelling: ♭ flats');
+  };
+
+  /** Cycle the explicit root pitch class: auto → C → C#/Db → … → B → auto. */
+  const QUICK_ROOTS = ['C', 'C♯/D♭', 'D', 'D♯/E♭', 'E', 'F', 'F♯/G♭', 'G', 'G♯/A♭', 'A', 'A♯/B♭', 'B'];
+  const cycleRoot = () => {
+    const cur = eff.noteRootPc;
+    const next = cur == null || cur < 0 ? 0 : cur >= 11 ? -1 : cur + 1;
+    setEffPatch({ noteRootPc: next });
+    flash(next < 0 ? 'Root: auto (lowest note)' : `Root: ${QUICK_ROOTS[next]}`);
+  };
+
+  // ---------- quick-settings toolbar (chord editor) ----------
+  const NOTE_MODE_META: Record<NoteLabelMode, { icon: string; name: string; hint: string }> = {
+    letter:   { icon: '♪', name: 'Letter', hint: 'Notes mode — label every dot with its actual pitch name (A, Bb, F#…) computed from tuning + fret.' },
+    interval: { icon: '↔', name: 'Interval', hint: 'Intervals mode — label dots by distance from the root (R, m2, M3, P5, TT…).' },
+    tonal:    { icon: '𝄟', name: 'Tonal', hint: 'Tonal mode — scale degrees of the key (1, b3, #4…); non-diatonic notes get accidental prefixes.' },
+    degree:   { icon: '#', name: 'Degree', hint: 'Degree mode — chromatic numbering with root = 1 (1..12, octave = 8/1+).' },
+  };
+  const MODE_ORDER: NoteLabelMode[] = ['letter', 'interval', 'tonal', 'degree'];
+  const cycleNoteMode = () => {
+    const i = MODE_ORDER.indexOf(eff.noteLabelMode);
+    const next = MODE_ORDER[(i + 1) % MODE_ORDER.length];
+    setEffPatch({ noteLabelMode: next });
+    flash(`Labels: ${NOTE_MODE_META[next].name}`);
+  };
+  const keyLabel = eff.noteKey.trim() === '' ? 'auto' : eff.noteKey.trim();
+  const rootLabel = eff.noteRootPc == null || eff.noteRootPc < 0 ? 'auto' : QUICK_ROOTS[eff.noteRootPc];
+
+  // delayed tooltip (500 ms hover) for the quick-settings toolbar
+  const qbarRef = useRef<HTMLDivElement>(null);
+  const qtipTimer = useRef<number | undefined>(undefined);
+  const showQTip = useCallback((e: RMouseEvent<HTMLDivElement>) => {
+    const btn = (e.target as HTMLElement).closest?.('.qbtn') as HTMLElement | null;
+    if (!btn || !qbarRef.current) return;
+    window.clearTimeout(qtipTimer.current);
+    qtipTimer.current = window.setTimeout(() => {
+      const tipEl = qbarRef.current?.querySelector('.qtip') as HTMLElement | null;
+      if (!tipEl) return;
+      tipEl.textContent = btn.dataset.tip ?? '';
+      tipEl.style.left = `${btn.offsetLeft + btn.offsetWidth / 2}px`;
+      tipEl.classList.add('show');
+    }, 500);
+  }, []);
+  const hideQTip = useCallback(() => {
+    window.clearTimeout(qtipTimer.current);
+    const tipEl = qbarRef.current?.querySelector('.qtip') as HTMLElement | null;
+    tipEl?.classList.remove('show');
+  }, []);
 
   // ---------- coalesced snapshots for continuous drags ----------
   // A drag records ONE snapshot when it starts; intermediate moves must not
@@ -1586,6 +1696,38 @@ export default function App() {
                 <button className="btn small danger" onClick={() => { pushHistory(); setPage(p => { const i = p.chords.findIndex(c => c.id === selectedId); if (i >= 0) { p.chords.splice(i, 1); delete p.placements[selectedId!]; p.selected = p.chords[0]?.id ?? null; } return p; }); }}
                   disabled={!hasSel}>🗑 Remove chord</button>
                 <span className="mini">{hasSel ? `${eff.startFret}–${eff.startFret + eff.numFrets - 1} · ${eff.orientation}` : 'Click a chord box above to select it'}</span>
+              </div>
+
+              {/* quick-settings toolbar — toggles apply to the SELECTED chord
+                  without opening the settings panel. Hover ≥500ms for hints. */}
+              <div ref={qbarRef} className={`quick-bar ${hasSel ? '' : 'off'}`} aria-disabled={!hasSel}
+                onMouseOver={showQTip} onMouseOut={hideQTip}>
+                <button className={`qbtn ${eff.noteVisible ? 'on' : ''}`} disabled={!hasSel}
+                  data-tip={NOTE_MODE_META[eff.noteLabelMode].hint}
+                  onClick={() => setEffPatch({ noteVisible: !eff.noteVisible })}>♪±</button>
+                <button className={`qbtn mode ${eff.noteVisible ? 'on' : ''}`} disabled={!hasSel}
+                  data-tip={`Label mode: ${NOTE_MODE_META[eff.noteLabelMode].name}. Click to cycle Notes → Intervals → Tonal → Degree.`}
+                  onClick={cycleNoteMode}>{NOTE_MODE_META[eff.noteLabelMode].icon}&thinsp;{NOTE_MODE_META[eff.noteLabelMode].name}</button>
+                <button className={`qbtn oct ${eff.octaveMode ? 'on' : ''}`} disabled={!hasSel}
+                  data-tip={'Octave mode: while ON, every dot you add also drops ALL octaves of that pitch class that fit on the visible board (outside positions are clipped).\nUse ⤓ to strip octave duplicates of the whole shape.'}
+                  onClick={() => setEffPatch({ octaveMode: !eff.octaveMode })}>8va</button>
+                <button className="qbtn act" disabled={!hasSel || entry.dots.length === 0}
+                  data-tip="Fill: add every missing octave of every sounding note within the visible frets (undoable)."
+                  onClick={fillAllOctaves}>⤒</button>
+                <button className="qbtn act" disabled={!hasSel || entry.dots.length === 0}
+                  data-tip="Strip: remove octave duplicates, keeping one representative per pitch class (the lowest-fret dot)."
+                  onClick={dedupeOctaves}>⤓</button>
+                <span className="qsep" />
+                <button className="qbtn key" disabled={!hasSel}
+                  data-tip="Reference key for tonal labels (degrees like 1, b3, #4). Click cycles through common keys; ‘auto’ uses the shape root as major."
+                  onClick={cycleKey}>𝄡&thinsp;{keyLabel}</button>
+                <button className="qbtn key" disabled={!hasSel}
+                  data-tip="Root used by interval & degree modes. Click cycles C→C♯/D♭→…→B→auto (auto = lowest-sounding note of the shape)."
+                  onClick={cycleRoot}>R&thinsp;{rootLabel}</button>
+                <button className={`qbtn ${eff.preferFlats ? 'on' : ''}`} disabled={!hasSel}
+                  data-tip="Spelling preference: ♭ flats vs ♯ sharps for letter names and tonal accidentals."
+                  onClick={cycleAccidental}>{eff.preferFlats ? '♭' : '♯'}</button>
+                <span className="qtip" role="tooltip" />
               </div>
               <div className="board-editor-body" ref={boardWrapRef} onDoubleClick={e => e.preventDefault()}
                 onMouseDown={onBoardPointerDown} onMouseMove={onBoardPointerMove} onMouseUp={onBoardPointerUp}
