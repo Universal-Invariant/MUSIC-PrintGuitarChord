@@ -184,11 +184,20 @@ export default function App() {
     let keys: (keyof Settings)[] = [...new Set<(keyof Settings)>([...SYNCED_GLOBAL_KEYS, ...gChanged])];
     let valueSrc: Settings = src;
     if (!first && applyAllRef.current) {
-      const ch = CHORD_SETTING_KEYS.filter(k => changedKeysOf(prevSnapRef.current!, src).has(k));
+      // Apply-to-ALL is ON: broadcast whatever just changed. If a chord is
+      // selected we take its LIVE effective values ("make every chord look
+      // like this one"); otherwise the global defaults win. Reading from
+      // refs keeps this correct even when React batches several edits.
+      const live: Settings = (selectedId && entry) ? effRef.current : src;
+      const edited = changedKeysOf(prevSnapRef.current!, src);
+      const ch = CHORD_SETTING_KEYS.filter(k => edited.has(k));
       if (ch.length) {
-        if (selectedId && entry) { keys = [...keys, ...ch]; valueSrc = effRef.current; }
-        else keys = [...keys, ...ch];
+        keys = [...keys, ...ch];
+        valueSrc = live;
       }
+      // Also re-sync the always-global keys from the same live source so a
+      // selected chord's inherited global values propagate consistently.
+      for (const k of SYNCED_GLOBAL_KEYS) if (edited.has(k)) valueSrc = live;
     }
     prevSnapRef.current = jsonSnap(settings);
     const textDefaultEdited = keys.some(k => (TEXT_DEFAULT_KEYS as readonly string[]).includes(k as string));
@@ -1435,6 +1444,10 @@ export default function App() {
     // always end up at exactly the same size again (repeated clicks of ＋ give
     // a stable 1.1×, not a compounding drift from mismatched starting scales).
     const absolute = !!page.config.absoluteScale;
+    // In absolute mode the target is an EXACT size, not a compounding factor:
+    // every chord's placement scale is reset to the default (100%) and then
+    // set to k — so chords that started at the same size end up at exactly
+    // the same size again (＋ twice ⇒ 121%, stable, no drift).
     setPage(p => {
       for (const c of p.chords) {
         const es = applyGlobalBoardScale(mergeChordSettings(settings, c.settings), settings);

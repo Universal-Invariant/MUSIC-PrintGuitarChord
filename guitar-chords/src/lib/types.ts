@@ -301,13 +301,17 @@ export function sanitizeGlobalValue<K extends GlobalOnlyKey>(k: K, v: unknown): 
   switch (k) {
     case 'boardLengthScale':
     case 'boardWidthScale':
-      return Number(clampBoardScale(v, 1).toFixed(3)) as Settings[K];
+      // 4 decimals: the slider's Ctrl step goes to 0.0005 (0.05%) — anything
+      // coarser here would silently snap typed/fine values back.
+      return Number(clampBoardScale(v, 1).toFixed(4)) as Settings[K];
     case 'baseDotSize':
       // integer px range — dot radius is computed from this in whole pixels
       return Math.round(clampNum(v, DOT_SIZE_MIN, DOT_SIZE_MAX, DEFAULT_BASE_DOT_SIZE)) as Settings[K];
     case 'shapeScale':
+      // Keep full fine precision (4 decimals) so Shift/Ctrl slider steps and
+      // typed values like 0.735 are NOT re-rounded by this sanitizer.
       return (typeof v === 'number' && Number.isFinite(v)
-        ? roundStep(clampNum(v, SHAPE_SCALE_MIN, SHAPE_SCALE_MAX, 1), 0.01) : 1) as Settings[K];
+        ? Number(clampNum(v, SHAPE_SCALE_MIN, SHAPE_SCALE_MAX, 1).toFixed(4)) : 1) as Settings[K];
     case 'defaultTextSize':
       return clampNum(v, TEXT_SIZE_MIN, TEXT_SIZE_MAX, DEFAULT_TEXT_SIZE) as Settings[K];
     case 'defaultTextRotation':
