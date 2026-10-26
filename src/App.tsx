@@ -3,6 +3,7 @@ import type { ChordDoc, ChordPlacement, Dot, PageConfig, PageDoc, Settings } fro
 import {
   CHORD_SETTING_KEYS, GLOBAL_ONLY_SETTING_KEYS, MIN_NUM_FRETS, applyGlobalBoardScale, applyGlobalSettingsToAllChords,
   bakeInheritedItemsToAllChords, chordPatchFrom, clampNumFrets, clampStartFret, fitsPage,
+  sanitizeGlobalValue,
   mergeChordSettings, pageSizePx, placementsOverlap, resolveCollision, snapVal, stripGlobalKeysFromChordDocs,
   syncKeysToAllChords, uid,
 } from './lib/types';
@@ -63,7 +64,17 @@ function changedKeysOf(a: Settings, b: Settings): Set<keyof Settings> {
 
 export default function App() {
   // ---------- persisted state ----------
-  const [settings, setSettings] = useState<Settings>(() => loadSettings());          // global defaults
+  const [settings, setSettings] = useState<Settings>(() => {
+    const s = loadSettings();
+    // normalize the GLOBAL-only keys exactly like the load-time patch sanitizer
+    // does — otherwise a legacy/corrupt localStorage value (e.g. baseDotSize 4)
+    // would render and export with an out-of-range size that no slider can
+    // produce, until the user happens to touch that control.
+    for (const k of GLOBAL_ONLY_SETTING_KEYS) {
+      (s as Record<string, unknown>)[k] = sanitizeGlobalValue(k, s[k]);
+    }
+    return s;
+  });                                                       // global defaults (sanitized)
   const [customs, setCustoms] = useState<Record<string, string>>(() => loadCustomShapes());
   const [chords, setChords] = useState<ChordDoc[]>(() => loadChordList());           // saved library
   const [pages, setPages] = useState<PageDoc[]>(() => {
@@ -296,6 +307,14 @@ export default function App() {
   const libDirtyRef = useRef(false);
   const pushLibHistory = useCallback(() => { libDirtyRef.current = true; }, []);
 
+  /** Page-level ops that MUST create a new page object: React bails out of a
+   *  state update when the updater returns the SAME reference it was given, so
+   *  in-place mutation + `return p` used to leave the UI stale until some other
+   *  action forced a re-render (e.g. "Paste settings" appeared to do nothing). */
+  const setPageObj = useCallback((fn: (p: PageDoc) => PageDoc) => {
+    setPages(list => list.map((p, i) => (i === pageIdxRef.current ? fn(structuredClone(p)) : p)));
+  }, []);
+
   /** Mutate the selected chord doc (history-aware). */
   const mutate = useCallback((fn: (d: ChordDoc) => ChordDoc) => {
     if (!selectedId) return;
@@ -303,8 +322,13 @@ export default function App() {
     setPage(p => {
       const i = p.chords.findIndex(c => c.id === selectedId);
       if (i < 0) return p;
-      p.chords[i] = fn(structuredClone(p.chords[i]));
-      return p;
+      // Return a NEW page object (shallow copy with the replaced chord) instead
+      // of mutating-and-returning the same reference: React bails out when a
+      // state updater returns identity, so in-place mutation used to leave the
+      // UI showing stale data until some *other* action re-rendered.
+      const next = [...p.chords];
+      next[i] = fn(structuredClone(next[i]));
+      return { ...p, chords: next };
     });
   }, [selectedId, setPage, pushHistory]);
 
@@ -315,8 +339,9 @@ export default function App() {
     setPage(p => {
       const i = p.chords.findIndex(c => c.id === id);
       if (i < 0) return p;
-      p.chords[i] = fn(structuredClone(p.chords[i]));
-      return p;
+      const next = [...p.chords];
+      next[i] = fn(structuredClone(next[i]));
+      return { ...p, chords: next };
     });
   }, [setPage, pushHistory]);
 
@@ -327,8 +352,11 @@ export default function App() {
     setPage(p => {
       const i = p.chords.findIndex(c => c.id === selectedId);
       if (i < 0) return p;
-      p.chords[i].settings = chordPatchFrom(next);
-      return p;
+      const nc = structuredClone(p.chords[i]);
+      nc.settings = chordPatchFrom(next);
+      const arr = [...p.chords];
+      arr[i] = nc;
+      return { ...p, chords: arr };
     });
   }, [selectedId, setPage, pushHistory]);
 
@@ -1294,7 +1322,7 @@ export default function App() {
     for (const t of c.texts) t.id = uid('text');
     for (const f of c.fingerings) f.id = uid('fing');
     if (!opts.patch) c.settings = undefined; // inherit current global defaults
-    setPage(p => {
+    setPageObj(p => {
       const es = applyGlobalBoardScale(mergeChordSettings(settings, c.settings), settings);
       const nat = intrinsic(renderSvg(c, es, { customs }));
       // find a free spot so new chords never land on top of existing ones
@@ -1323,13 +1351,13 @@ export default function App() {
   const pastePatchAll = () => {
     if (!patchClip) { flash('Nothing copied yet'); return; }
     pushHistory();
-    setPage(p => { for (const c of p.chords) c.settings = structuredClone(patchClip); return p; });
+    setPageObj(p => { for (const c of p.chords) c.settings = structuredClone(patchClip); return p; });
     flash('Settings applied to ALL chords on this page');
   };
   const pastePatchSelected = () => {
     if (!patchClip || !selectedId) { flash('Nothing copied or no chord selected'); return; }
     pushHistory();
-    setPage(p => {
+    setPageObj(p => {
       const i = p.chords.findIndex(c => c.id === selectedId);
       if (i >= 0) p.chords[i].settings = structuredClone(patchClip);
       return p;
@@ -1340,7 +1368,7 @@ export default function App() {
   const renameSelected = (name: string) => {
     if (!selectedId) return;
     pushHistory();
-    setPage(p => {
+    setPageObj(p => {
       const i = p.chords.findIndex(c => c.id === selectedId);
       if (i >= 0) p.chords[i].name = name;
       return p;
@@ -1404,12 +1432,12 @@ export default function App() {
     if (!page) return;
     const ps = pageSizePx(page.config);
     pushHistory();
-    setPage(p => {
+    setPageObj(p => {
       for (const c of p.chords) {
         const es = applyGlobalBoardScale(mergeChordSettings(settings, c.settings), settings);
         const nat = canvasSize(es);
         let pl = p.placements[c.id] ?? { x: 20, y: 20, w: Math.round(nat.w), h: Math.round(nat.h), scale: 1 };
-        // legacy fix-up: stored w/h ≈ nat*scale ⇒ they were pre-multiplied → divide out
+        // legacy fix-up + always re-measure the native box from CURRENT settings
         if (Math.abs(pl.w - nat.w * pl.scale) <= Math.max(2, nat.w * 0.05) && Math.abs(pl.w - nat.w) > 2) {
           pl = { ...pl, w: Math.round(nat.w), h: Math.round(nat.h) };
         } else {
@@ -1448,7 +1476,7 @@ export default function App() {
     // every chord's placement scale is reset to the default (100%) and then
     // set to k — so chords that started at the same size end up at exactly
     // the same size again (＋ twice ⇒ 121%, stable, no drift).
-    setPage(p => {
+    setPageObj(p => {
       for (const c of p.chords) {
         const es = applyGlobalBoardScale(mergeChordSettings(settings, c.settings), settings);
         const nat = canvasSize(es);
@@ -1471,7 +1499,7 @@ export default function App() {
     if (!page) return;
     pushHistory();
     const ps = pageSizePx(page.config);
-    setPage(p => {
+    setPageObj(p => {
       for (const c of p.chords) {
         const es = applyGlobalBoardScale(mergeChordSettings(settings, c.settings), settings);
         const nat = canvasSize(es);
