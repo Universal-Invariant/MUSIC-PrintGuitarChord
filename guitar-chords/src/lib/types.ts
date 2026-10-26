@@ -77,6 +77,12 @@ export interface Settings {
   flipAcross: boolean;       // true ⇒ strings mirrored across the board center line
   fretSpacing: number;       // px between frets in 'equal' mode (board length = numFrets × this)
   stringGap: number;         // px between strings (board width = 5 × this)
+  boardLengthScale: number;  // 0.2..3 — multiplies the along-fret-axis extent of the board
+                             // rectangle (squash / stretch the LENGTH). Applied to logical
+                             // coordinates BEFORE rendering, so fonts, dot glyphs and stroke
+                             // widths never distort — only positions rescale.
+  boardWidthScale: number;   // 0.2..3 — multiplies the across-string extent (the WIDTH) of
+                             // the board rectangle. Same coordinate-space rule as above.
   stringWidthMode: 'uniform' | 'progressive';
   minStringWidth: number;
   maxStringWidth: number;
@@ -219,7 +225,8 @@ export function clampStartFret(v: number): number {
 /** The keys that make up the per-chord geometry/appearance patch. */
 export const CHORD_SETTING_KEYS: (keyof Settings)[] = [
   'numFrets', 'startFret', 'orientation', 'flipAlong', 'flipAcross',
-  'fretSpacing', 'stringGap', 'stringWidthMode', 'minStringWidth', 'maxStringWidth',
+  'fretSpacing', 'stringGap', 'boardLengthScale', 'boardWidthScale',
+  'stringWidthMode', 'minStringWidth', 'maxStringWidth',
   'nutWidth', 'fretThickness', 'reverseStrings', 'boardTaper', 'taperMode',
   'fretLabels', 'fretLabelList', 'openSide', 'margins', 'spacing',
   'firstFretSize', 'lastFretSize', 'showDots', 'noteVisible', 'dotTextColor',

@@ -12,8 +12,8 @@ import { pitchAtRel, midiToName, computeDotLabel, TUNING_HIGH_TO_LOW } from './m
 import type { LabelCtx } from './music';
 import {
   boardAcross, canvasSize, cellCenter, farBand, fingeringPos,
-  fretLength, fretPositions, halfWidthAlong, nutZoneDepth,
-  project, showFretLabel, stringLabelAlong, stringLayout,
+  fretLength, fretPositions, halfWidthAlong, lengthScale, nutZoneDepth,
+  project, showFretLabel, stringLabelAlong, stringLayout, widthScale,
   DOUBLE_INLAY_FRETS, INLAY_FRETS, NUM_STRINGS,
 } from './geometry';
 
@@ -218,7 +218,7 @@ function renderNut(s: Settings, P: (t: number, a: number) => { x: number; y: num
 
 function renderInlays(s: Settings, P: (t: number, a: number) => { x: number; y: number }, positions: number[]): string {
   const out: string[] = [];
-  const r = Math.min(7, s.stringGap * 0.16 + 3);
+  const r = Math.min(7, s.stringGap * widthScale(s) * 0.16 + 3);
   for (let i = 0; i < s.numFrets; i++) {
     const abs = s.startFret + i;
     const isDouble = DOUBLE_INLAY_FRETS.includes(abs);
@@ -248,7 +248,7 @@ function renderOpenMarkers(doc: ChordDoc, s: Settings, P: (t: number, a: number)
   const out: string[] = [];
   // just outside the first fret line, in the floating open zone (before the pitch ring)
   const tMark = -nutZoneDepth(s) * 0.92;
-  const r = Math.min(9, Math.max(5, s.stringGap * 0.22));
+  const r = Math.min(9, Math.max(5, s.stringGap * widthScale(s) * 0.22));
   const color = col(withA(s.fretColor, 0.9));
   for (const f of doc.fingerings) {
     const txt = f.text.trim().toLowerCase();

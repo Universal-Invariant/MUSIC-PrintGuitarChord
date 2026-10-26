@@ -34,9 +34,29 @@ export const OPEN_ZONE = 30;   // floating zone before the first fret line (open
 /** true ⇒ nut drawn at the FAR end (bottom / right); fret numbers run backwards. */
 export function flippedAlong(s: Settings): boolean { return s.flipAlong; }
 
-/** Board width across strings (string span + small padding). */
-export function boardAcross(s: Settings): number {
+/** Board width across strings (string span + small padding), in BASE units. */
+function boardAcrossBase(s: Settings): number {
   return (NUM_STRINGS - 1) * s.stringGap + Math.max(14, s.stringGap * 0.5);
+}
+
+/** ---------- Board rectangle scaling (coordinate-space, applied BEFORE rendering) ----------
+ *  The fretboard is a logical rectangle; these factors squash/stretch it along the
+ *  fret axis (length) and across the strings (width). They multiply LOGICAL
+ *  coordinates only — every consumer (fret lines, taper, strings, dots, nut,
+ *  labels, canvas size, hit-testing) passes through them, so relative positions
+ *  stay exact while fonts, dot glyphs and stroke widths are never distorted. */
+export function lengthScale(s: Settings): number {
+  const v = s.boardLengthScale;
+  return Number.isFinite(v) && v > 0 ? Math.max(0.2, Math.min(3, v)) : 1;
+}
+export function widthScale(s: Settings): number {
+  const v = s.boardWidthScale;
+  return Number.isFinite(v) && v > 0 ? Math.max(0.2, Math.min(3, v)) : 1;
+}
+
+/** Board width across strings (scaled to actual board units). */
+export function boardAcross(s: Settings): number {
+  return boardAcrossBase(s) * widthScale(s);
 }
 
 /**
@@ -65,7 +85,10 @@ export function fretPositions(s: Settings): number[] {
       w *= r;
     }
   }
-  return pos;
+  // board rectangle LENGTH scaling — applied once here so every downstream
+  // consumer (fret lines, dots, taper, hit-testing, canvas size) stays consistent
+  const ls = lengthScale(s);
+  return ls === 1 ? pos : pos.map(p => p * ls);
 }
 
 /** Total length along the fret axis (between the 0-fret line and the last fret line). */
@@ -83,9 +106,9 @@ export function fretLength(s: Settings): number {
  * Only used when s.taperMode === 'absolute'.
  */
 export function halfWidthAtFret(s: Settings, absFret: number): number {
-  const hwMin = boardAcross(s) / 2; // narrowest point = the nut / 0-fret end
+  const hwMin = boardAcrossBase(s) / 2; // narrowest point = the nut / 0-fret end (base units)
   const factor = 1 + s.boardTaper * (Math.pow(2, absFret / 12) - 1);
-  return hwMin * factor;
+  return hwMin * factor * widthScale(s);
 }
 
 /**
@@ -111,8 +134,8 @@ export function fanDegreeAtAlong(s: Settings, t: number): number {
 
 /** Half-width at a point along the fret axis (t is 0 at the nut line, grows toward high frets). */
 export function halfWidthAlong(s: Settings, t: number): number {
-  const hwMin = boardAcross(s) / 2;
-  return hwMin * (1 + s.boardTaper * fanDegreeAtAlong(s, t));
+  const hwMin = boardAcrossBase(s) / 2;
+  return hwMin * (1 + s.boardTaper * fanDegreeAtAlong(s, t)) * widthScale(s);
 }
 
 /** true ⇒ string order reversed (low E first) — "left-handed" string layout. */
@@ -127,14 +150,16 @@ export function stringsReversed(s: Settings): boolean {
  *  dots, labels, markers and hit-testing all follow the same layout. */
 export function stringLayout(s: Settings): { offset: number; width: number }[] {
   const out: { offset: number; width: number }[] = [];
-  const span = (NUM_STRINGS - 1) * s.stringGap;
+  const ws = widthScale(s);
+  const gap = s.stringGap * ws;              // scaled spacing keeps strings on the scaled grid
+  const span = (NUM_STRINGS - 1) * gap;
   const sign = s.flipAcross ? -1 : 1;
   for (let i = 0; i < NUM_STRINGS; i++) {
     let w: number;
     if (s.stringWidthMode === 'uniform') w = s.minStringWidth;
     else w = s.minStringWidth + ((s.maxStringWidth - s.minStringWidth) * i) / (NUM_STRINGS - 1);
     const slot = stringsReversed(s) ? (NUM_STRINGS - 1 - i) : i;
-    out.push({ offset: sign * (slot * s.stringGap - span / 2), width: w });
+    out.push({ offset: sign * (slot * gap - span / 2), width: w });
   }
   return out;
 }
@@ -143,7 +168,7 @@ export function stringLayout(s: Settings): { offset: number; width: number }[] {
  *  Deeper when the nut bar itself is shown (startFret === 1); it also grows with the
  *  user-configurable open-pitch ring offset so the ring never overlaps the open dots. */
 export function nutZoneDepth(s: Settings): number {
-  const base = nutShown(s) ? Math.max(30, s.nutWidth + 24) : OPEN_ZONE;
+  const base = (nutShown(s) ? Math.max(30, s.nutWidth + 24) : OPEN_ZONE) * lengthScale(s);
   return base + openNoteExtra(s);
 }
 
@@ -156,7 +181,7 @@ export function openNoteExtra(s: Settings): number {
 /** Extra reserved band PAST the last fret line (fingerings + string pitches on the far side). */
 export function farBand(s: Settings): number {
   const pitches = s.openSide === 'far' && s.openNoteLabels ? 26 + openNoteExtra(s) : 0;
-  return Math.max(FING_BAND, 24 + pitches);
+  return Math.max(FING_BAND, 24 + pitches) * lengthScale(s);
 }
 
 /**
@@ -168,7 +193,7 @@ export function contentSize(s: Settings): { along: number; across: number } {
   const flen = fretLength(s);
   return {
     along: nutZoneDepth(s) + flen + farBand(s),
-    across: boardAcross(s) + OUT_LABEL_PAD * 2,
+    across: boardAcrossBase(s) * widthScale(s) + OUT_LABEL_PAD * 2,
   };
 }
 
@@ -262,7 +287,7 @@ export function hitTest(s: Settings, cx: number, cy: number): { string: number; 
     const d = Math.abs(across - strings[i].offset);
     if (d < best) { best = d; strIdx = i; }
   }
-  if (best > s.stringGap * 0.62) return null;
+  if (best > s.stringGap * widthScale(s) * 0.62) return null;
   // find fret slot
   let rel: number;
   if (along < 0) {
@@ -304,7 +329,7 @@ export function cellCenter(s: Settings, string: number, rel: number): { x: numbe
 /** Canvas position of a fingering label for one string (band opposite the nut, mirrored with the board). */
 export function fingeringPos(s: Settings, string: number): { x: number; y: number; anchor: 'start' | 'end' | 'middle' } {
   const strings = stringLayout(s);
-  const t = fretLength(s) + 24; // inside the reserved far band past the last fret
+  const t = fretLength(s) + 24 * lengthScale(s); // inside the reserved far band past the last fret
   const p = project(s, t, strings[string].offset);
   const vertical = s.orientation === 'vertical';
   return { x: p.x, y: p.y, anchor: vertical ? 'middle' : (flippedAlong(s) ? 'end' : 'start') };
@@ -316,8 +341,8 @@ export function fingeringPos(s: Settings, string: number): { x: number; y: numbe
  *  never collides with the open (rel −1) note dots. */
 export function stringLabelAlong(s: Settings): number {
   const extra = Math.max(0, Math.min(160, s.openNoteOffset ?? 0));
-  if (s.openSide === 'far') return fretLength(s) + 14 + extra;
-  return -nutZoneDepth(s) + 8 + extra;
+  if (s.openSide === 'far') return fretLength(s) + 14 * lengthScale(s) + extra;
+  return -nutZoneDepth(s) + 8 * lengthScale(s) + extra;
 }
 
 /** Parse a page-style fret-number list ("3-5, 8, 12", "all", "none"/"" ⇒ empty). */
