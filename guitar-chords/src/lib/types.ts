@@ -427,6 +427,169 @@ export function applyGlobalSettingsToAllChords(list: ChordDoc[], global: Setting
  *  than the fretboard scale now). */
 export const applyBoardScaleToAllChords = applyGlobalSettingsToAllChords;
 
+/** Subset of GLOBAL_ONLY_SETTING_KEYS that are ACTUAL PER-CHORD settings —
+ *  every chord carries them in its patch so exports / print composer /
+ *  library thumbnails render with the current global values even when the
+ *  consumer merges only the chord's own patch. */
+export const SYNCED_GLOBAL_KEYS: GlobalOnlyKey[] = [
+  'boardLengthScale', 'boardWidthScale',
+  'baseDotSize', 'shapeScale',
+  'defaultTextFont', 'defaultTextColor', 'defaultTextSize', 'defaultTextRotation',
+];
+
+/** Which per-chord patch keys a "apply-to-all" edit should propagate.
+ *  - always: the synced global keys above (every chord must carry them)
+ *  - plus:   the edited key itself, IF it is a real per-chord setting
+ *            (numFrets, startFret, orientation, margins, …)
+ *  Keys that are neither (e.g. color basket / shape cycle lists, which live
+ *  globally by design) return [] ⇒ nothing to propagate. Pure. */
+export function allChordPatchKeysFor(edited: string): (keyof Settings)[] {
+  if ((SYNCED_GLOBAL_KEYS as readonly string[]).includes(edited)) return [...SYNCED_GLOBAL_KEYS];
+  if ((CHORD_SETTING_KEYS as readonly string[]).includes(edited)) return [...SYNCED_GLOBAL_KEYS, edited as keyof Settings];
+  return [];
+}
+
+/** Sync ONLY the given keys from the global settings into EVERY chord doc's
+ *  patch (the toolbar "Apply to all chords" mode). `global` may be either the
+ *  app-wide settings or the selected chord's effective settings — the caller
+ *  decides what value each chord receives. Never stores undefined values.
+ *  Returns the SAME array instance when no chord actually changes. */
+export function syncKeysToAllChords<T extends ChordDoc>(list: T[], global: Settings, keys: readonly (keyof Settings)[]): T[] {
+  let changed = false;
+  const out = list.map(c => {
+    const prev = (c.settings ?? {}) as Partial<Settings>;
+    let differs = false;
+    for (const k of keys) {
+      const nv = global[k];
+      if (nv === undefined) continue; // never write undefined into a patch
+      const ov = prev[k] as unknown, nvv = nv as unknown;
+      if (typeof nvv === 'object' ? JSON.stringify(ov) !== JSON.stringify(nvv) : ov !== nvv) { differs = true; break; }
+    }
+    if (!differs) return c;
+    changed = true;
+    const np: Record<string, unknown> = { ...prev };
+    for (const k of keys) { const v = global[k]; if (v !== undefined) np[k] = structuredClone(v); }
+    return { ...c, settings: np as ChordSettingsPatch };
+  });
+  return changed ? out : list;
+}
+
+/** True ⇒ the chord patch carries stale GLOBAL-only values (legacy data). */
+function patchHasGlobalKeys(patch: Partial<Settings> | undefined): boolean {
+  return !!patch && GLOBAL_ONLY_SETTING_KEYS.some(k => k in patch);
+}
+
+/** Keys a "synced" chord still needs copied from the source settings. A chord
+ *  counts as synced when its patch carries ALL global-only keys with EXACTLY
+ *  the source's values (JSON-compared, so color objects compare by content).
+ *  Pure helper shared by the load-time migration and the apply-to-all sync. */
+function missingSyncKeys(patch: Partial<Settings> | undefined, src: Settings, keys: readonly (keyof Settings)[]): (keyof Settings)[] {
+  const out: (keyof Settings)[] = [];
+  for (const k of keys) {
+    const nv = src[k];
+    if (nv === undefined) continue; // never write undefined into a patch
+    const ov = patch?.[k] as unknown, nvv = nv as unknown;
+    if (typeof nvv === 'object' ? JSON.stringify(ov) !== JSON.stringify(nvv) : ov !== nv) out.push(k);
+  }
+  return out;
+}
+
+/** One-time normalization of a loaded chord doc against the CURRENT global
+ *  settings (runs inside normalizeChord, i.e. before React state exists):
+ *  - legacy patches that shadow a GLOBAL-only key are stripped first;
+ *  - then every chord is brought up to date so each patch carries the current
+ *    global values (exports / print composer render correctly even when they
+ *    merge only the chord's own patch);
+ *  - finally, text items that were created to FOLLOW the global defaults
+ *    (font/size/rotation unset ⇒ live inheritance) get those defaults baked
+ *    in, so future explicit "apply to all chords" edits can reach them too.
+ *  Returns the SAME object when nothing needs fixing. */
+export function normalizeChordGlobals(c: ChordDoc, global: Settings): ChordDoc {
+  let changed = false;
+  let patch = c.settings as Partial<Settings> | undefined;
+  if (patchHasGlobalKeys(patch)) {
+    const p: Record<string, unknown> = { ...patch };
+    for (const k of GLOBAL_ONLY_SETTING_KEYS) delete p[k];
+    patch = p as Partial<Settings>;
+    changed = true;
+  }
+  const missing = missingSyncKeys(patch, global, SYNCED_GLOBAL_KEYS);
+  if (missing.length) {
+    const np: Record<string, unknown> = { ...patch };
+    for (const k of missing) np[k] = structuredClone(global[k]);
+    patch = np as ChordSettingsPatch;
+    changed = true;
+  }
+  let dots = c.dots, texts = c.texts, fingerings = c.fingerings;
+  const mapItems = <T extends Dot | TextBox | Fingering>(list: T[]): T[] => {
+    let any = false;
+    const out = list.map(it => {
+      const nb = bakeItemDefaults(it, global);
+      if (nb !== it) any = true;
+      return nb;
+    });
+    return any ? out : list;
+  };
+  dots = mapItems(c.dots); texts = mapItems(c.texts); fingerings = mapItems(c.fingerings);
+  if (dots !== c.dots || texts !== c.texts || fingerings !== c.fingerings) changed = true;
+  if (!changed) return c;
+  return { ...c, settings: patch, dots, texts, fingerings };
+}
+
+/** Batch-normalize an entire chord list (pages / library) — identity-preserving
+ *  like stripGlobalKeysFromChordDocs, safe inside effects. */
+export function normalizeAllChordGlobals<T extends ChordDoc>(list: T[], global: Settings): T[] {
+  let changed = false;
+  const out = list.map(c => {
+    const n = normalizeChordGlobals(c, global);
+    if (n !== c) changed = true;
+    return n as T;
+  });
+  return changed ? out : list;
+}
+
+/** Bake the CURRENT global text defaults into one drawable item, but only on
+ *  properties it does not explicitly override yet (a non-null / present per-item
+ *  value is a deliberate override and stays untouched). This makes items
+ *  created via newText()/newFingering() (which store NO font/size/rotation so
+ *  they follow the globals live) reachable by a later "apply to all chords"
+ *  edit: they receive the value active at bake time instead of silently
+ *  inheriting some other older default. Idempotent — returns the SAME object
+ *  when nothing needs baking. */
+export function bakeItemDefaults<T extends Dot | TextBox | Fingering>(it: T, s: Settings): T {
+  const p: Record<string, unknown> = {};
+  const inheritable = (v: unknown) => v === undefined || v === null;
+  // font: shared by dots / text boxes / fingerings — inheritable when nullish
+  if (inheritable((it as { font?: string | null }).font)) p.font = s.defaultTextFont ?? 'Arial';
+  // size: text boxes & fingerings only (Dot has no `size`; dot glyphs use the
+  // global baseDotSize/shapeScale directly, and dot label scale is `textSize`)
+  if ('size' in it && inheritable((it as { size?: number | null }).size)) p.size = s.defaultTextSize ?? 14;
+  // rotation: text boxes only (Dot.rotation is the SHAPE glyph rotation and is
+  // always stored — makeDot initializes it — so it must never be baked)
+  if ('rotation' in it && inheritable((it as { rotation?: number | null }).rotation)) p.rotation = s.defaultTextRotation ?? 0;
+  // text-inside-dot color follows the global text color while un-overridden
+  if ('textColor' in it && inheritable((it as { textColor?: ChordColor | null }).textColor)) p.textColor = { ...(s.defaultTextColor ?? { hex: '#ffffff', alpha: 1 }) };
+  if (Object.keys(p).length === 0) return it;
+  return { ...it, ...p } as T;
+}
+
+/** Bake the global text defaults into EVERY inherited item of a batch of
+ *  chord docs (used by the apply-to-all propagation when a text default was
+ *  part of the change). Identity-preserving: returns the SAME array instance
+ *  when no item needed baking. */
+export function bakeInheritedItemsToAllChords<T extends ChordDoc>(list: T[], src: Settings): T[] {
+  let changed = false;
+  const out = list.map(c => {
+    const dots = c.dots.map(d => bakeItemDefaults(d, src));
+    const texts = c.texts.map(t => bakeItemDefaults(t, src));
+    const fing = c.fingerings.map(f => bakeItemDefaults(f, src));
+    if (dots === c.dots && texts === c.texts && fing === c.fingerings) return c;
+    changed = true;
+    return { ...c, dots, texts, fingerings: fing };
+  });
+  return changed ? out : list;
+}
+
 /** Normalized chord id accessor — old saved data may lack `id`. */
 export function chordId(c: ChordDoc): string {
   if (!c.id) c.id = uid('chord');

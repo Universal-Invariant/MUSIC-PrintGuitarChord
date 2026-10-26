@@ -101,37 +101,81 @@ export default function App() {
     [settings, entry],
   );
 
-  // ---------- GLOBAL settings propagate to EVERY chord ----------
-  // The fretboard scale, dot sizing ("Dot base size", "Shape scale") and text
-  // defaults (font / color / size / rotation) are app-wide: changing one of
-  // them must affect ALL created chords — every page AND the saved library —
-  // not just the selected one. We iterate over all chord docs and sync the
-  // current global values into each chord's own settings patch.
-  //   • keyed on a snapshot of ONLY the global-only keys, so unrelated
-  //     settings edits never trigger it;
-  //   • the helpers return the SAME array instance when nothing changed, so
-  //     this can never loop renders;
-  //   • legacy patches that still shadow these keys are stripped as part of
-  //     the same pass (the synced values overwrite them anyway).
-  const globalOnlyKeyStr = globalOnlyKey(settings);
+  // ---------- GLOBAL settings propagate to EVERY chord (opt-in toggle) ----------
+  // The toolbar "Apply changes to all chords" switch decides the mode:
+  //   ON  ⇒ every edit made through the Settings panel is applied as if it were
+  //         a global one — we iterate over ALL chords (every page AND the saved
+  //         library) and sync the edited values into each chord's own patch:
+  //           foreach (chord in chords) chord.apply(change)
+  //   OFF ⇒ only the currently SELECTED chord receives per-chord edits (the
+  //         app-wide GLOBAL-only sliders/text defaults still affect every
+  //         chord automatically, exactly as before).
+  // Keyed on a snapshot of ONLY the relevant keys so unrelated state edits
+  // never trigger it; the helpers return the SAME array instance when nothing
+  // changed, so this can never loop renders.
+  const [applyAllChords, setApplyAllChords] = useState<boolean>(() => {
+    try { return localStorage.getItem('gc_apply_all_chords') === '1'; } catch { return false; }
+  });
+  const applyAllRef = useRef(applyAllChords); useEffect(() => { applyAllRef.current = applyAllChords; }, [applyAllChords]);
+  const toggleApplyAll = () => setApplyAllChords(v => { const nv = !v; try { localStorage.setItem('gc_apply_all_chords', nv ? '1' : '0'); } catch { /* ignore */ } return nv; });
+
+  /** Snapshot of the keys whose change should fire the propagation pass:
+   *  always the GLOBAL-only keys; plus ALL per-chord setting keys while the
+   *  apply-to-all toggle is active. */
+  function propagationKey(s: Settings): string {
+    const keys: (keyof Settings)[] = applyAllRef.current
+      ? [...new Set<(keyof Settings)>([...GLOBAL_ONLY_SETTING_KEYS, ...CHORD_SETTING_KEYS])]
+      : GLOBAL_ONLY_SETTING_KEYS;
+    return keys.map(k => JSON.stringify(s[k])).join('|');
+  }
+  const prevPropKeyRef = useRef<string>('');
+  const propKeyStr = propagationKey(settings);
   useEffect(() => {
+    // First run after mount / toggle flip: just record the baseline — no
+    // retroactive broadcast (the toggle must not flood history with an undo
+    // step for edits that happened before it was turned on).
+    if (!prevPropKeyRef.current) { prevPropKeyRef.current = propKeyStr; return; }
+    const first = prevPropKeyRef.current !== propKeyStr && !applyAllRef.current;
+    prevPropKeyRef.current = propKeyStr;
+    if (!applyAllRef.current && !first) return; // selected-only mode: nothing to do
+    pushHistory();
+    const src = settingsRef.current;
+    // Which patch keys each chord receives:
+    //  • global-only keys are ALWAYS synced (they must live in every patch so
+    //    exports / print composer render with the current values);
+    //  • in apply-to-all mode, every per-chord key edited since the last pass
+    //    is synced too — from the GLOBAL defaults when editing globally, or
+    //    from the selected chord's effective settings when editing a chord
+    //    ("make all chords look like this one").
+    const gChanged = GLOBAL_ONLY_SETTING_KEYS.filter(k => first || changedKeysOf(prevSnapRef.current, src).has(k));
+    let keys: (keyof Settings)[] = [...new Set<(keyof Settings)>([...SYNCED_GLOBAL_KEYS, ...gChanged])];
+    let valueSrc: Settings = src;
+    if (!first && applyAllRef.current) {
+      const ch = CHORD_SETTING_KEYS.filter(k => changedKeysOf(prevSnapRef.current, src).has(k));
+      if (ch.length) {
+        if (selectedId && entry) { keys = [...keys, ...ch]; valueSrc = effRef.current; }
+        else keys = [...keys, ...ch];
+      }
+    }
+    const textDefaultEdited = keys.some(k => TEXT_DEFAULT_KEYS.includes(k as GlobalOnlyTextKey));
+    const applyTo = (list: ChordDoc[]): ChordDoc[] => {
+      let out = syncKeysToAllChords(list, valueSrc, keys);
+      if (textDefaultEdited) out = bakeInheritedItemsToAllChords(out, valueSrc);
+      return out;
+    };
     setPages(list => {
       let changed = false;
       const out = list.map(p => {
-        const nextChords = applyGlobalSettingsToAllChords(
-          stripGlobalKeysFromChordDocs(p.chords), settingsRef.current);
+        const nextChords = applyTo(p.chords);
         if (nextChords === p.chords) return p;
         changed = true;
         return { ...p, chords: nextChords };
       });
       return changed ? out : list;
     });
-    setChords(list => {
-      const next = applyGlobalSettingsToAllChords(stripGlobalKeysFromChordDocs(list), settingsRef.current);
-      return next === list ? list : next;
-    });
+    setChords(list => applyTo(list));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [globalOnlyKeyStr]);
+  }, [propKeyStr]);
 
   // ---------- editing state ----------
   const [tool, setTool] = useState<Tool>('dot');
