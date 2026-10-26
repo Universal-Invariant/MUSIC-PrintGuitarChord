@@ -175,44 +175,6 @@ export default function App() {
   });
   const applyAllRef = useRef(applyAllChords); useEffect(() => { applyAllRef.current = applyAllChords; }, [applyAllChords]);
 
-  /** Remove stale 'mirrorOctaves' entries from every stored chord patch.
-   *  This behaviour switch is APP-WIDE only (see CHORD_SETTING_KEYS): while a
-   *  chord patch shadowed it, enabling the setting could silently be undone
-   *  for any chord whose saved patch carried the old value. Pure and
-   *  identity-preserving — returns the SAME array when nothing needs fixing. */
-  const stripMirrorShadowFromChordDocs = useCallback(<T extends ChordDoc>(list: T[]): T[] => {
-    let changed = false;
-    const out = list.map(c => {
-      const p = c.settings as Record<string, unknown> | undefined;
-      if (!p || !('mirrorOctaves' in p)) return c;
-      changed = true;
-      const np = { ...p };
-      delete np.mirrorOctaves;
-      return { ...c, settings: np as ChordSettingsPatch };
-    });
-    return changed ? out : list;
-  }, []);
-
-  // One-time cleanup of legacy chord patches that still shadow the app-wide
-  // 'mirrorOctaves' switch (see CHORD_SETTING_KEYS). Without this, a stale
-  // per-chord value could silently override the global toggle — making the
-  // "Mirror across octaves on same string" setting impossible to enable for
-  // chords saved before it became an app-wide behaviour flag. Identity-
-  // preserving, so this effect settles after one pass and never loops.
-  useEffect(() => {
-    setChords(list => stripMirrorShadowFromChordDocs(list));
-    setPages(list => {
-      let changed = false;
-      const out = list.map(p => {
-        const nextChords = stripMirrorShadowFromChordDocs(p.chords);
-        if (nextChords === p.chords) return p;
-        changed = true;
-        return { ...p, chords: nextChords };
-      });
-      return changed ? out : list;
-    });
-  }, [stripMirrorShadowFromChordDocs]);
-
   /** Broadcast freshly-edited settings values to every chord doc (pages AND
    *  the saved library). `src` carries the new values; `editedKeys` lists the
    *  per-chord keys the edit actually changed. Each chord patch receives:
@@ -222,17 +184,15 @@ export default function App() {
    *   • PLUS every edited per-chord key, taken from `src` (the new global
    *     defaults when editing globally, or the selected chord's effective
    *     settings when editing a chord — "make all chords look like this one").
-   *  Legacy 'mirrorOctaves' shadows are stripped from every patch along the
-   *  way, so the single app-wide toggle always governs mirroring for ALL
-   *  chords. Text-default edits additionally re-bake items that still INHERIT
+   *  Text-default edits additionally re-bake items that still INHERIT
    *  the defaults so later broadcasts can reach them. Identity-preserving:
    *  chords that already match stay untouched, so this can never loop renders. */
   const broadcastSettingsToAllChords = useCallback((src: Settings, globals: Settings, editedKeys: readonly (keyof Settings)[]) => {
     const keys: (keyof Settings)[] = [...new Set<keyof Settings>([...GLOBAL_ONLY_SETTING_KEYS, ...editedKeys])];
     const textDefaultEdited = keys.some(k => (TEXT_DEFAULT_KEYS as readonly string[]).includes(k as string));
     const applyTo = (list: ChordDoc[]): ChordDoc[] => {
-      // drop legacy mirrorOctaves + global shadows first, then write fresh values in
-      let out = syncKeysToAllChords(stripMirrorShadowFromChordDocs(stripGlobalKeysFromChordDocs(list)), src, keys);
+      // drop legacy global shadows first, then write fresh values in
+      let out = syncKeysToAllChords(stripGlobalKeysFromChordDocs(list), src, keys);
       // GLOBAL-only keys must end up at their true app-wide values
       out = syncKeysToAllChords(out, globals, GLOBAL_ONLY_SETTING_KEYS);
       if (textDefaultEdited) out = bakeInheritedItemsToAllChords(out, src);
