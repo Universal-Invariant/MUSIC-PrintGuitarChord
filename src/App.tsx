@@ -265,7 +265,11 @@ export default function App() {
   const [showLib, setShowLib] = useState(false);
   const [inlineEdit, setInlineEdit] = useState<boolean>(() => localStorage.getItem('gcd.inlineEdit') === '1');
   useEffect(() => { localStorage.setItem('gcd.inlineEdit', inlineEdit ? '1' : '0'); }, [inlineEdit]);
-  const [dragging, setDragging] = useState(false);       // text-box drag inside a chord
+  /** Synchronous drag state. Mouse handlers run in DOM order and the mousedown
+   *  that ARMS a gesture must immediately suppress the click/dblclick follow-ups
+   *  — waiting for a state commit would let those stale events re-toggle the
+   *  gesture or open dialogs mid-drag. */
+  const draggingRef = useRef(false);
   const [pageDrag, setPageDrag] = useState(false);       // chord box drag on the page
   const dragRef = useRef<{ id: string; kind: 'dot' | 'text'; itemId: string; dx: number; dy: number } | null>(null);
   const pageDragRef = useRef<{ id: string; sx: number; sy: number; ox: number; oy: number } | null>(null);
@@ -276,6 +280,9 @@ export default function App() {
    *  beginItemDrag - lets the release tell a plain CLICK (open dialog) apart
    *  from a DRAG (reposition silently). */
   const itemDragPressRef = useRef<{ x: number; y: number; moved: boolean } | null>(null);
+  /** True right after beginItemDrag: the next applyItemDrag re-measures the
+   *  grab offset against the freshly rendered doc (see beginItemDrag). */
+  const pendingReanchorRef = useRef(false);
   const [patchClip, setPatchClip] = useState<ReturnType<typeof chordPatchFrom> | null>(null);
 
   // ---------- undo / redo (HistoryManager over `pages` + `chords` slices) ----------
@@ -708,6 +715,7 @@ export default function App() {
 
   /** One click inside a chord board with an EDITING tool (strict hit-test). */
   const handleBoardClickLocal = (local: { x: number; y: number }, e: React.MouseEvent, id?: string): boolean => {
+    if (draggingRef.current) return true;      // mid drag gesture — swallow stale clicks
     const cid = id ?? selectedId;
     if (!cid || !page) return false;
     const doc = page.chords.find(c => c.id === cid);
@@ -756,6 +764,7 @@ export default function App() {
 
   /** Double-click / Alt+click / right-click inside a chord board → edit dialog. */
   const openEditLocal = (local: { x: number; y: number }, id?: string) => {
+    if (draggingRef.current) return;           // mid drag gesture — swallow stale events
     const cid = id ?? selectedId;
     if (!cid) return;
     lastClickRef.current = null;
@@ -765,7 +774,7 @@ export default function App() {
 
   // ---------- click on the selected chord board (external editor) ----------
   const onBoardClick = (e: React.MouseEvent) => {
-    if (!entry || dragging || pageDrag) return;
+    if (!entry || draggingRef.current || pageDrag) return;
     e.stopPropagation();
     // Some browsers suppress dblclick when the second click's default is prevented
     // anywhere in its path — implement double-click manually (400 ms / 8 px window).
@@ -802,7 +811,7 @@ export default function App() {
 
   // edit dialog opens via double-click, Alt+click or right-click
   const openEditAt = (e: React.MouseEvent) => {
-    if (!entry) return;
+    if (!entry || draggingRef.current) return;
     e.preventDefault();
     e.stopPropagation();
     openEditLocal(toBoardCoords(e));
@@ -864,7 +873,17 @@ export default function App() {
       const c = cellCenter(es, d.string, dotAlongFret(es, d.fret - es.startFret, fretPositions(es)));
       dragRef.current = { id, kind: 'dot', itemId: d.id, dx: local.x - c.x, dy: local.y - c.y };
     } else return false;
-    beginDragHistory();          // ONE snapshot for the whole drag gesture
+    // ONE snapshot for the whole gesture. pushHistory() is suppressed while a
+    // gesture is active, so this call records the pre-drag state even though
+    // beginItemDrag can run from inside another click handler.
+    pushHistory();
+    // The grab offset above was measured against the CURRENTLY RENDERED doc.
+    // When the caller just changed selection or page contents in the same
+    // event (select-then-grab), React hasn't re-rendered yet and the entry may
+    // be stale — re-measure the item position on the next frame so the box
+    // doesn't jump by the delta between old and new renders.
+    pendingReanchorRef.current = true;
+    draggingRef.current = true;              // suppress click follow-ups NOW
     setDragging(true);
     setSel(s);
     itemDragPressRef.current = client ? { x: client.x, y: client.y, moved: false } : null;
@@ -883,16 +902,37 @@ export default function App() {
 
   const applyItemDrag = (local: { x: number; y: number }, client?: { x: number; y: number }) => {
     const ref = dragRef.current;
-    if (!ref || !sel) return;
+    if (!ref || !draggingRef.current) return;
+    if (!sel && !itemDragPressRef.current) return;
     // Mark the gesture as MOVED once the pointer travels past a few client px
     // from where it was pressed - below that it still counts as a click.
     const press = itemDragPressRef.current;
     if (press && client && Math.hypot(client.x - press.x, client.y - press.y) > 4) press.moved = true;
+    if (pendingReanchorRef.current) {
+      pendingReanchorRef.current = false;
+      const rc = textDragCtx(ref.id);
+      if (rc) {
+        if (ref.kind === 'text') {
+          const t = rc.doc.texts.find(tt => tt.id === ref.itemId);
+          if (t) { ref.dx = local.x - t.x * rc.w; ref.dy = local.y - t.y * rc.h; }
+        } else {
+          const d = rc.doc.dots.find(dd => dd.id === ref.itemId);
+          if (d) {
+            const es2 = applyGlobalBoardScale(mergeChordSettings(settings, rc.doc.settings), settings);
+            const c2 = cellCenter(es2, d.string, dotAlongFret(es2, d.fret - es2.startFret, fretPositions(es2)));
+            ref.dx = local.x - c2.x; ref.dy = local.y - c2.y;
+          }
+        }
+      }
+    }
     const ctx = textDragCtx(ref.id);
     if (!ctx) return;
     if (ref.kind === 'text') {
-      const nx = (local.x - ref.dx) / ctx.w;
-      const ny = (local.y - ref.dy) / ctx.h;
+      let nx = (local.x - ref.dx) / ctx.w;
+      let ny = (local.y - ref.dy) / ctx.h;
+      if (!Number.isFinite(nx) || !Number.isFinite(ny)) return;   // never corrupt coords
+      nx = Math.max(-0.5, Math.min(1.5, nx));
+      ny = Math.max(-0.5, Math.min(1.5, ny));
       setPageNoHist(p => {           // intermediate moves never touch history
         const i = p.chords.findIndex(c => c.id === ref.id);
         if (i < 0) return p;
@@ -936,21 +976,36 @@ export default function App() {
    *  moved was a repositioning drag and ends silently. Returns true when an
    *  item drag was active (so callers can skip their own mouseup logic). */
   const endItemDrag = (): boolean => {
-    if (!dragging) return false;
+    if (!draggingRef.current) return false;
+    draggingRef.current = false;               // synchronous — blocks stale click follow-ups
     const ref = dragRef.current;
     const press = itemDragPressRef.current;
     itemDragPressRef.current = null;
+    pendingReanchorRef.current = false;
     if (ref && ref.kind === 'text' && press && !press.moved) {
       setEditing({ kind: 'text', id: ref.itemId });   // click (not drag): edit it
     }
-    endDragHistory();            // re-arm history after the gesture
-    setTimeout(() => setDragging(false), 0);
+    histPausedRef.current = false;         // re-arm history after the gesture
+    setDragging(false);                    // state only drives cursor/UI now
     dragRef.current = null;
     return true;
   };
 
+  /** Abort any armed/active item-drag gesture WITHOUT opening dialogs — used
+   *  when the mouseup happened outside the chord/board so the follow-up events
+   *  never see a live gesture. */
+  const cancelItemDrag = () => {
+    if (!draggingRef.current) return;
+    draggingRef.current = false;
+    itemDragPressRef.current = null;
+    pendingReanchorRef.current = false;
+    dragRef.current = null;
+    histPausedRef.current = false;
+    setDragging(false);
+  };
+
   const onBoardPointerDown = (e: React.MouseEvent) => {
-    if (!entry) return;
+    if (!entry || draggingRef.current) return;
     // With the SELECT tool any text box is grabbable directly. With the TEXT
     // tool the press was already armed by handleBoardClickLocal (mousedown
     // fires before click), so do not re-begin it here or we would restart the
@@ -959,7 +1014,7 @@ export default function App() {
     beginTextDrag(selectedId!, toBoardCoords(e), { x: e.clientX, y: e.clientY });
   };
   const onBoardPointerMove = (e: React.MouseEvent) => {
-    if (!dragging || !dragRef.current || !sel) return;
+    if (!draggingRef.current || !dragRef.current) return;
     applyItemDrag(toBoardCoords(e), { x: e.clientX, y: e.clientY });
   };
   const onBoardPointerUp = () => {
@@ -1014,7 +1069,7 @@ export default function App() {
 
   /** One click inside an on-page chord box while INLINE EDIT is ON. */
   const handleInlineChordClick = (id: string, e: React.MouseEvent) => {
-    if (!page || dragging || pageDrag) return;
+    if (!page || draggingRef.current || pageDrag) return;
     // Clicking a chord makes it the active chord for ALL editing tools — the
     // external editor below and the dialog paths then describe this chord too.
     if (page.selected !== id) selectChord(id);
@@ -1171,7 +1226,7 @@ export default function App() {
   };
   const onChordBoxMove = (e: React.MouseEvent) => {
     // inline-edit: dragging a DOT or TEXT BOX inside a chord moves the item, not the box
-    if (dragging && dragRef.current && sel) {
+    if (draggingRef.current && dragRef.current) {
       const cid = chordAtClient(e.clientX, e.clientY) ?? dragRef.current.id;
       const local = toChordLocalById(cid, e.clientX, e.clientY);
       if (local) applyItemDrag(local, { x: e.clientX, y: e.clientY });
