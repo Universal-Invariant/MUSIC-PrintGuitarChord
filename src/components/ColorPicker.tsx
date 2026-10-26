@@ -75,8 +75,15 @@ export default function ColorPicker({ value, onChange, label, compact }: Props) 
     const r = el.getBoundingClientRect();
     const pw = SIZE + 34, ph = SIZE + SV_H + 110;
     let top = r.bottom + 6;
+    // Flip above the swatch when there is no room below...
     if (top + ph > window.innerHeight - 8 && r.top - 6 - ph > 8) top = r.top - 6 - ph;
+    // ...and if it would STILL fall off-screen (short viewports / near edges),
+    // center the panel in the viewport instead of clipping it.
+    if (top < 8 || top + ph > window.innerHeight - 8) {
+      top = Math.max(8, (window.innerHeight - ph) / 2);
+    }
     let left = Math.min(Math.max(8, r.left), Math.max(8, window.innerWidth - pw - 8));
+    if (left + pw > window.innerWidth - 8) left = Math.max(8, (window.innerWidth - pw) / 2);
     setPanelPos({ top, left });
     // eslint-disable-next-line
   }, [open]);
