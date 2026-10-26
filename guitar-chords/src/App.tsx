@@ -491,7 +491,19 @@ export default function App() {
         }
         return d;
       }
-      if (existing) return { ...d, dots: d.dots.filter(dd => dd.id !== existing.id) };
+      if (existing) {
+        // OCTAVE MODE: removing a note also removes every octave twin of its
+        // pitch class — the exact inverse of octave-aware dot placement above.
+        if (es.octaveMode) {
+          const pcOf = (dot: Dot) => {
+            const m = (es.tuning[dot.string] ?? 64) + Math.max(0, dot.fret);
+            return ((m % 12) + 12) % 12;
+          };
+          const targetPc = pcOf(existing);
+          return { ...d, dots: d.dots.filter(dd => dd.id !== existing.id && pcOf(dd) !== targetPc) };
+        }
+        return { ...d, dots: d.dots.filter(dd => dd.id !== existing.id) };
+      }
       d.dots.push(makeDot(es, hit.string, hit.rel));
       // OCTAVE MODE: also drop every octave of the new note that falls inside
       // the visible fret range (positions outside startFret..last are clipped).
