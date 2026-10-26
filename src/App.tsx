@@ -371,6 +371,35 @@ export default function App() {
   const transposeChordDoc = (src: ChordDoc, n: number, gdef: Settings, wrap = false): ChordDoc => {
     const c = structuredClone(src);
     const s = mergeChordSettings(gdef, c.settings);
+    // MIRROR mode ("Mirror across octaves on same string", ±12·k twins on the
+    // SAME string). It must survive a transpose — especially a WRAPPED one:
+    // wrapping folds every dot back into its own octave band and would
+    // otherwise silently drop the higher-octave copies (everything past the
+    // first octave simply vanishes). So transposed dots are treated as
+    // ANCHORS only; after the move every anchor re-extends its ±12·k twins on
+    // the same string. Anchors never sit at ±12 of another anchor (they are
+    // unique per pitch class per string), so no note is ever duplicated even
+    // when both mirror modes interact with the transpose.
+    const mirroring = !!s.mirrorOctaves && !s.octaveMode;
+    const anchorId = new Set<string>();
+    if (mirroring) {
+      const byStr = new Map<number, Dot[]>();
+      for (const d0 of c.dots) {
+        const arr = byStr.get(d0.string) ?? [];
+        arr.push(d0);
+        byStr.set(d0.string, arr);
+      }
+      for (const arr of byStr.values()) {
+        arr.sort((a, b) => a.fret - b.fret);
+        for (let i = 0; i < arr.length; i++) {
+          const used = new Array(i).fill(false);
+          for (let j = 0; j < i; j++) {
+            if ((arr[i].fret - arr[j].fret) % 12 === 0) { used[j] = true; break; }
+          }
+          if (!used[i]) anchorId.add(arr[i].id);   // greedy lowest-fret anchors
+        }
+      }
+    }
     // 1) Dot frets ONLY — the tuning array is deliberately left untouched.
     //    Plain mode: fret + n raises each dot's actual pitch by n semitones
     //    on the same string (shape moves up the neck; open strings of the
@@ -386,6 +415,29 @@ export default function App() {
         d.fret += n;
       }
       if (d.text) { const r = shiftPitchLabel(d.text, n); if (r !== null) d.text = r; }
+    }
+    // 1b) Re-extend the mirror twins from every anchor slot that is now free.
+    //     Wrapping can collapse several pre-mirrored dots onto ONE fret/string
+    //     (two octave twins always share a pitch class, so they land on the
+    //     same wrapped fret) — the surplus duplicates are dropped here so the
+    //     board stays clean while the full ±12·k spread is restored below.
+    if (mirroring) {
+      const seen = new Set<string>();
+      c.dots = c.dots.filter(d => {
+        const key = `${d.string}:${d.fret}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+      const anchors = c.dots.filter(d => anchorId.has(d.id));
+      for (const a of anchors) {
+        for (const k of [-5, -4, -3, -2, -1, 1, 2, 3, 4, 5]) {
+          const f = a.fret + 12 * k;
+          if (f < 0) continue;
+          if (c.dots.some(x => x.string === a.string && x.fret === f)) continue;
+          c.dots.push({ ...structuredClone(a), id: uid(), fret: f });
+        }
+      }
     }
     // 2) Explicit root pitch class (-1 ⇒ auto/lowest note — stays correct via
     //    the shifted frets + unchanged tuning) and explicit key string ("F", "Dm"…).
@@ -529,6 +581,25 @@ export default function App() {
   const setEffPatch = useCallback((patch: Partial<Settings>) => {
     setEff({ ...eff, ...patch });
   }, [setEff, eff]);
+
+  /** Toggle a per-chord behavior flag from the quick bar with NO selection
+   *  requirement. Used by ♪± / 8va / 8ve↔ so these modes are ALWAYS
+   *  enableable:
+   *   • a chord selected  ⇒ patch that chord via setEff — this keeps the
+   *     "🌐 All chords" broadcast semantics intact (the diff inside setEff
+   *     carries the flipped key to every chord on every page + library);
+   *   • no chord selected ⇒ flip the APP-WIDE DEFAULT instead (and, when the
+   *     toggle is ON, broadcast it into every chord's patch) — previously the
+   *     buttons were hard-disabled without a selection, which made the
+   *     settings look impossible to enable. */
+  const toggleBehaviorFlag = useCallback((key: 'noteVisible' | 'octaveMode' | 'mirrorOctaves') => {
+    if (selectedId && entry) {
+      const cur = applyGlobalBoardScale(mergeChordSettings(settingsRef.current, entry.settings), settingsRef.current);
+      setEff({ ...cur, [key]: !cur[key] });
+      return;
+    }
+    commitGlobalSettings(prev => ({ ...prev, [key]: !prev[key] }));
+  }, [selectedId, entry, setEff, commitGlobalSettings]);
 
   // ---------- quick note-label helpers (toolbar in the chord editor) ----------
   /** Add every octave of EVERY pitch class currently sounding on the board
@@ -2297,24 +2368,27 @@ export default function App() {
               </div>
 
               {/* quick-settings toolbar — toggles apply to the SELECTED chord
-                  without opening the settings panel. Hover ≥500ms for hints. */}
+                  without opening the settings panel. The behavior modes (♪± /
+                  8va / 8ve↔) are NEVER locked behind a selection: with no
+                  chord selected they flip the app-wide default instead, so
+                  every mode is always enableable. Hover ≥500ms for hints. */}
               <div ref={qbarRef} className={`quick-bar ${hasSel ? '' : 'off'}`} aria-disabled={!hasSel}
                 onMouseOver={showQTip} onMouseOut={hideQTip}>
-                <button className={`qbtn ${eff.noteVisible ? 'on' : ''}`} disabled={!hasSel}
+                <button className={`qbtn ${eff.noteVisible ? 'on' : ''}`}
                   data-tip={NOTE_MODE_META[eff.noteLabelMode].hint}
-                  onClick={() => setEffPatch({ noteVisible: !eff.noteVisible })}>♪±</button>
+                  onClick={() => toggleBehaviorFlag('noteVisible')}>♪±</button>
                 <button className={`qbtn mode ${eff.noteVisible ? 'on' : ''}`} disabled={!hasSel}
                   data-tip={`Label mode: ${NOTE_MODE_META[eff.noteLabelMode].name}. Click to cycle Notes → Intervals → Tonal → Degree.`}
                   onClick={cycleNoteMode}>{NOTE_MODE_META[eff.noteLabelMode].icon}&thinsp;{NOTE_MODE_META[eff.noteLabelMode].name}</button>
-                <button className={`qbtn oct ${eff.octaveMode ? 'on' : ''}`} disabled={!hasSel}
+                <button className={`qbtn oct ${eff.octaveMode ? 'on' : ''}`}
                   data-tip={'Octave mode: while ON, every dot you add also drops ALL octaves of that pitch class that fit on the visible board (outside positions are clipped).\nUse ⤓ to strip octave duplicates of the whole shape.'}
-                  onClick={() => setEffPatch({ octaveMode: !eff.octaveMode })}>8va</button>
-                <button className={`qbtn oct ${eff.mirrorOctaves && !eff.octaveMode ? 'on dimmed' : ''}`} disabled={!hasSel || eff.octaveMode}
+                  onClick={() => toggleBehaviorFlag('octaveMode')}>8va</button>
+                <button className={`qbtn oct ${eff.mirrorOctaves && !eff.octaveMode ? 'on dimmed' : ''}`}
                   data-tip={eff.octaveMode
-                    ? 'Mirror octaves is covered by 8va mode — turn 8va off to use it.'
-                    : 'Mirror across octaves on the SAME string: every dot you add/remove/edit is mirrored to fret ±12·k (k = -5..5) on the same string — the identical pitch one or more octaves away. Edit once, every octave copy follows (adds, removes, colors, shapes, text). Fine-grained sibling of 8va (which spreads across strings).'}
-                  title="Mirror across octaves on same string (irrelevant while 8va is on)"
-                  onClick={() => setEffPatch({ mirrorOctaves: !eff.mirrorOctaves })}>8ve↔</button>
+                    ? 'Mirror octaves is covered by 8va mode — turn 8va off to use it.\nThe switch itself stays enabled: click here or in Settings to flip "Mirror across octaves" anyway (it takes effect as soon as 8va is off).'
+                    : 'Mirror across octaves on the SAME string: every dot you add/remove/edit is mirrored to fret ±12·k (k = -5..5) on the same string — the identical pitch one or more octaves away. Edit once, every octave copy follows (adds, removes, colors, shapes, text). Survives transposes — even octave-WRAPPED ones re-extend the ±12·k copies instead of losing them. Fine-grained sibling of 8va (which spreads across strings).'}
+                  title="Mirror across octaves on same string (redundant while 8va is on — 8va already spreads every pitch over all octaves)"
+                  onClick={() => toggleBehaviorFlag('mirrorOctaves')}>8ve↔</button>
                 <button className="qbtn act" disabled={!hasSel || entry.dots.length === 0}
                   data-tip="Fill: add every missing octave of every sounding note within the visible frets (undoable)."
                   onClick={fillAllOctaves}>⤒</button>
