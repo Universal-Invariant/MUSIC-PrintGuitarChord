@@ -165,6 +165,11 @@ export interface Settings {
   noteKey: string;           // '' ⇒ auto (root major); e.g. "F", "Dm", "Bb min"
   octaveMode: boolean;       // true ⇒ adding a note also adds EVERY octave of it
                              // that falls inside the visible fret range
+  mirrorOctaves: boolean;    // true ⇒ every dot edit (add/remove/property) is
+                             // mirrored to ±12-fret twins ON THE SAME STRING —
+                             // the same pitch class one octave up/down at the
+                             // identical string position. Fine-grained sibling
+                             // of octaveMode; irrelevant while octaveMode is on.
   dotTextColor: ChordColor;  // color used for those automatic pitch labels
   openNoteLabels: boolean;   // true ⇒ the open-string pitch ring (e B G D A E) is shown
   openNoteOffset: number;    // px — extra distance of that ring away from the board,
@@ -276,7 +281,7 @@ export const CHORD_SETTING_KEYS: (keyof Settings)[] = [
   'nutWidth', 'fretThickness', 'reverseStrings', 'boardTaper', 'taperMode',
   'fretLabels', 'fretLabelList', 'openSide', 'margins', 'spacing',
   'firstFretSize', 'lastFretSize', 'showDots', 'noteVisible', 'dotTextColor',
-  'noteLabelMode', 'noteRootPc', 'noteKey', 'octaveMode',
+  'noteLabelMode', 'noteRootPc', 'noteKey', 'octaveMode', 'mirrorOctaves',
   'openNoteLabels', 'openNoteOffset', 'tuning', 'preferFlats',
   'dotMarkerColor', 'bgFill', 'fretColor', 'stringColor',
   'fretWidthPct',

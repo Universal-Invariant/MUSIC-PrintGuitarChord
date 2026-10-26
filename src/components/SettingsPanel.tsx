@@ -347,6 +347,10 @@ export default function SettingsPanel({ settings, onChange, customs, onCustomsCh
       <Section title="Note pitches & tuning">
         <label className="row check"><input type="checkbox" checked={s.noteVisible} onChange={e => set({ noteVisible: e.target.checked })} /><span>Note visible mode — auto-label every dot with its pitch</span></label>
         <div className="mini-note">When enabled, each note dot automatically shows the pitch computed from the string tuning and its offset into the string (relative fret, based on the starting fret) — no manual typing needed. A manually typed dot text always overrides the automatic pitch.</div>
+        <label className="row check"><input type="checkbox" checked={s.mirrorOctaves === true} disabled={s.octaveMode} onChange={e => set({ mirrorOctaves: e.target.checked })} /><span>Mirror across octaves on same string — extend every dot to fret ±12·k (k = -5..5)</span></label>
+        <div className="mini-note">{s.octaveMode
+          ? 'Irrelevant while 8va (octave mode) is ON — octave mode already spreads every pitch across all octave positions.'
+          : 'Fine-grained octave extension: whatever you place between frets 0–11 also appears at +12·k on the SAME string (and vice versa). Adding, removing, or editing any dot property (color, shape, text…) applies to every mirrored twin too, so high-fret layouts need half the work.'}</div>
         <label className="row"><span>Tuning preset</span>
           <select value="" onChange={e => {
             const p = TUNING_PRESETS.find(x => x.name === e.target.value);

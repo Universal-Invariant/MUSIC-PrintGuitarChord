@@ -225,8 +225,10 @@ body { font-family: 'Segoe UI', Arial, sans-serif; background: #eceff3; color: #
 .qbtn:hover:not(:disabled) { background: #e2ebf6; border-color: #8fa8bf; }
 .qbtn:disabled { opacity: .4; cursor: default; }
 .qbtn.on { background: #1f6feb; border-color: #175ecc; color: #fff; }
+.qbtn.on.dimmed { background: #7ba7e8; border-color: #6a93d4; }
 .qbtn.mode { font-weight: 600; }
 .qbtn.act { font-weight: 700; }
+.transpose-ctl .qbtn.wrap { height: 24px; }
 .qsep { width: 1px; height: 18px; background: #c3ccd6; margin: 0 3px; }
 /* delayed hover hint (shown after 500 ms via JS timer) */
 .qtip {
