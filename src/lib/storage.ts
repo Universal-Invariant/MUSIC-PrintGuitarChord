@@ -63,6 +63,7 @@ export const DEFAULT_SETTINGS: Settings = {
   noteRootPc: -1,
   noteKey: '',
   octaveMode: false,
+  mirrorOctaves: false,
   dotTextColor: { hex: '#ffffff', alpha: 1 },
   openNoteLabels: true,
   openNoteOffset: 14,
@@ -259,6 +260,7 @@ export function loadSettings(): Settings {
     if (typeof merged.noteRootPc !== 'number' || !Number.isFinite(merged.noteRootPc) || (merged.noteRootPc < -1) || (merged.noteRootPc > 11)) merged.noteRootPc = -1;
     if (typeof merged.noteKey !== 'string') merged.noteKey = '';
     if (typeof merged.octaveMode !== 'boolean') merged.octaveMode = false;
+    if (typeof merged.mirrorOctaves !== 'boolean') merged.mirrorOctaves = false;
     if (typeof merged.openNoteLabels !== 'boolean') merged.openNoteLabels = true;
     if (typeof merged.openNoteOffset !== 'number' || !Number.isFinite(merged.openNoteOffset)) merged.openNoteOffset = DEFAULT_SETTINGS.openNoteOffset;
     merged.openNoteOffset = Math.max(0, Math.min(160, merged.openNoteOffset));

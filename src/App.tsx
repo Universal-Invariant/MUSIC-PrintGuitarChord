@@ -374,25 +374,44 @@ export default function App() {
     const preferFlat = /[b♭]/.test(m[2]) || /^(b|#b)/.test(rest); // keep the chord's spelling bias
     return midiToName(pc + 60, preferFlat) + rest;
   };
+  /** Global "wrap octave" toggle (toolbar, next to Transpose): when ON, a
+   *  transpose keeps every dot inside its own octave band — a fret f in band
+   *  B = floor(f/12) lands at B·12 + ((f − B·12 + n) mod 12), so dots pushed
+   *  past the top of their octave wrap back to its bottom instead of leaving a
+   *  gap. One-shot edit flag: it only affects the NEXT transpose, then resets. */
+  const [transposeWrap, setTransposeWrap] = useState(false);
+  const transposeWrapRef = useRef(transposeWrap);
+  useEffect(() => { transposeWrapRef.current = transposeWrap; }, [transposeWrap]);
   /** Transpose EVERY sounding pitch of one chord up by n semitones — purely by
    *  modifying values in place (per-chord tuning, dot frets, explicit root/key,
    *  custom dot texts and auto note labels), never as a stored/render-time
    *  "transpose" setting. Open-string pitch names and letter-mode dot labels
    *  are DERIVED from `tuning` at draw time, so shifting the tuning array
-   *  shifts them automatically — nothing to bake there. */
-  const transposeChordDoc = (src: ChordDoc, n: number, gdef: Settings): ChordDoc => {
+   *  shifts them automatically — nothing to bake there. When `wrap` is true
+   *  each dot's new fret wraps WITHIN ITS OWN OCTAVE BAND (see above). */
+  const transposeChordDoc = (src: ChordDoc, n: number, gdef: Settings, wrap = false): ChordDoc => {
     const c = structuredClone(src);
     const s = mergeChordSettings(gdef, c.settings);
     // 1) Tuning patch: shifting every open string shifts ALL pitches equally —
     //    including the derived open-note ring and letter-mode labels. Only
     //    touch it when the chord actually carries its own tuning override.
-    if (c.settings && Array.isArray(c.settings.tuning)) {
+    //    (Wrap mode leaves the tuning untouched: dots move within their octave
+    //    bands, so open-string pitches must not shift.)
+    if (!wrap && c.settings && Array.isArray(c.settings.tuning)) {
       c.settings.tuning = (c.settings.tuning as number[]).map(m => (typeof m === 'number' ? m + n : m));
     }
     // 2) Dot frets: absFret + n keeps each dot's actual pitch in sync with the
     //    shifted tuning (relative slot stays identical ⇒ shape does not move).
+    //    WRAP mode: keep the dot inside its octave band — the pitch class
+    //    still shifts by n, but high frets fold back down into the same octave
+    //    (e.g. fret 11 +5 → 4, fret 17 +5 → 16) so transposed runs stay dense.
     for (const d of c.dots) {
-      d.fret += n;
+      if (wrap) {
+        const band = Math.floor(d.fret / 12) * 12;
+        d.fret = band + (((d.fret - band + n) % 12) + 12) % 12;
+      } else {
+        d.fret += n;
+      }
       if (d.text) { const r = shiftPitchLabel(d.text, n); if (r !== null) d.text = r; }
     }
     // 3) Explicit root pitch class (-1 ⇒ auto/lowest note — stays correct via
@@ -431,17 +450,18 @@ export default function App() {
     if (!Number.isFinite(n) || n === 0) return;
     const scopeAll = applyAllRef.current;
     if (!scopeAll && !selectedId) { flash('Select a chord first, or switch to 🌐 All chords'); return; }
+    // Consume the wrap toggle: it applies to THIS transpose only, then resets.
+    const wrap = transposeWrapRef.current;
+    if (wrap) setTransposeWrap(false);
     pushHistory();
     pushLibHistory();
     const gdef = settingsRef.current;
     setPages(list => list.map(p => ({
       ...p,
-      chords: p.chords.map(c => (scopeAll || c.id === selectedId) ? transposeChordDoc(c, n, gdef) : c),
+      chords: p.chords.map(c => (scopeAll || c.id === selectedId) ? transposeChordDoc(c, n, gdef, wrap) : c),
     })));
-    if (scopeAll) setChords(list => list.map(c => transposeChordDoc(c, n, gdef)));
-    flash(scopeAll
-      ? `Transposed ALL chords up ${n} semitone${n === 1 ? '' : 's'} (${n} → +${n})`
-      : `Transposed "${entry?.name ?? 'chord'}" up ${n} semitone${n === 1 ? '' : 's'}`);
+    if (scopeAll) setChords(list => list.map(c => transposeChordDoc(c, n, gdef, wrap)));
+    flash(`${wrap ? '⟲ Wrapped ' : 'Transposed '}${scopeAll ? 'ALL chords' : `"${entry?.name ?? 'chord'}"`} up ${n} semitone${n === 1 ? '' : 's'} (${n} → +${n})${wrap ? ' — octave-wrapped' : ''}`);
   };
 
   /** Page-level ops that MUST create a new page object: React bails out of a
@@ -746,6 +766,49 @@ export default function App() {
   //            inline editing on the page). `local` is a point in the chord's
   //            own canvas coordinate space. When `id` is omitted, acts on the
   //            selected chord (external-editor path). ----------
+
+  /** Same-string octave twins of a dot: fret ± 12·k (k = -5..5), i.e. the SAME
+   *  pitch class played at the same string position one or more octaves away.
+   *  Used by the "Mirror across octaves on same string" setting — the
+   *  fine-grained sibling of 8va (octaveMode), which mirrors across strings. */
+  const MIRROR_KS = [-5, -4, -3, -2, -1, 1, 2, 3, 4, 5];
+  const sameStringTwins = (dots: Dot[], anchor: Dot): Dot[] =>
+    dots.filter(dd => dd.id !== anchor.id && dd.string === anchor.string
+      && Math.abs(dd.fret - anchor.fret) % 12 === 0);
+  /** Mirror an ADD: clone the new dot to every ±12-fret twin slot that is free
+   *  (never duplicates an existing dot; negative frets are skipped). */
+  const mirrorAdd = (d: ChordDoc, nd: Dot, es: Settings): Dot[] => {
+    if (!es.mirrorOctaves || es.octaveMode) return [];
+    const out: Dot[] = [];
+    for (const k of MIRROR_KS) {
+      const f = nd.fret + 12 * k;
+      if (f < 0) continue;
+      if (d.dots.some(x => x.string === nd.string && x.fret === f)) continue;
+      out.push({ ...structuredClone(nd), id: uid(), fret: f });
+    }
+    return out;
+  };
+  /** Mirror a REMOVE: drop the anchor dot plus its same-string octave twins. */
+  const mirrorRemove = (dots: Dot[], anchor: Dot, es: Settings): Dot[] =>
+    es.mirrorOctaves && !es.octaveMode
+      ? dots.filter(dd => dd.id !== anchor.id && !(dd.string === anchor.string && Math.abs(dd.fret - anchor.fret) % 12 === 0))
+      : dots.filter(dd => dd.id !== anchor.id);
+  /** Mirror a PROPERTY EDIT: copy every changed visual/text field from the
+   *  edited dot onto its same-string octave twins (twins keep their own id
+   *  and fret). */
+  const mirrorPropEdit = (dots: Dot[], edited: Dot, es: Settings): Dot[] => {
+    if (!es.mirrorOctaves || es.octaveMode) return dots;
+    const twins = sameStringTwins(dots, edited);
+    if (!twins.length) return dots;
+    const tw = new Set(twins.map(t => t.id));
+    return dots.map(dd => tw.has(dd.id) ? {
+      ...dd,
+      colorIdx: edited.colorIdx, shapeIdx: edited.shapeIdx, text: edited.text,
+      font: edited.font, textColor: structuredClone(edited.textColor ?? null),
+      textSize: edited.textSize, transparency: edited.transparency, rotation: edited.rotation,
+    } : dd);
+  };
+
   const toggleDotAt = (hit: { string: number; rel: number }, e: { shiftKey: boolean; ctrlKey: boolean; metaKey: boolean }, id?: string) => {
     const cid = id ?? selectedId;
     if (!cid || !page) return;
@@ -770,6 +833,12 @@ export default function App() {
             dd.colorIdx = cycleColor[(pos + 1) % cycleColor.length] ?? 0;
           }
         }
+        // MIRROR mode: the cycled dot's same-string octave twins get the SAME
+        // resulting color (one click restyles every ±12-fret copy).
+        if (es.mirrorOctaves && !es.octaveMode) {
+          const anchor = d.dots.find(x => x.id === existing.id)!;
+          for (const t of sameStringTwins(d.dots, anchor)) t.colorIdx = anchor.colorIdx;
+        }
         return d;
       }
       if ((e.ctrlKey || e.metaKey) && existing) {
@@ -785,6 +854,10 @@ export default function App() {
             dd.shapeIdx = cycleShape[(pos + 1) % cycleShape.length] ?? 0;
           }
         }
+        if (es.mirrorOctaves && !es.octaveMode) {
+          const anchor = d.dots.find(x => x.id === existing.id)!;
+          for (const t of sameStringTwins(d.dots, anchor)) t.shapeIdx = anchor.shapeIdx;
+        }
         return d;
       }
       if (existing) {
@@ -798,9 +871,15 @@ export default function App() {
           const targetPc = pcOf(existing);
           return { ...d, dots: d.dots.filter(dd => dd.id !== existing.id && pcOf(dd) !== targetPc) };
         }
-        return { ...d, dots: d.dots.filter(dd => dd.id !== existing.id) };
+        // MIRROR mode: removing a note also removes its ±12-fret twins on the
+        // same string (the fine-grained equivalent of the 8va removal above).
+        return { ...d, dots: mirrorRemove(d.dots, existing, es) };
       }
-      d.dots.push(makeDot(es, hit.string, hit.rel));
+      const nd = makeDot(es, hit.string, hit.rel);
+      d.dots.push(nd);
+      // MIRROR mode: clone the new dot onto every free ±12-fret slot of the
+      // same string — same pitch, one or more octaves away (k = -5..5).
+      d.dots.push(...mirrorAdd({ ...d, dots: [nd] }, nd, es));
       // OCTAVE MODE: also drop every octave of the new note that falls inside
       // the visible fret range (positions outside startFret..last are clipped).
       if (es.octaveMode) {
@@ -1207,10 +1286,16 @@ export default function App() {
       setPage(p => {
         const i = p.chords.findIndex(cc => cc.id === id);
         if (i < 0) return p;
-        if (existing) p.chords[i].dots = p.chords[i].dots.filter(d => d.id !== existing.id);
-        else p.chords[i].dots.push(makeDot(es, hit.string, hit.rel));
-        if (p.selected !== id) p.selected = id;
-        return p;
+        const nc = structuredClone(p.chords[i]);   // never mutate the page object in place
+        if (existing) nc.dots = mirrorRemove(nc.dots, existing, es);
+        else {
+          const nd = makeDot(es, hit.string, hit.rel);
+          nc.dots.push(nd);
+          nc.dots.push(...mirrorAdd({ ...nc, dots: [nd] }, nd, es));
+        }
+        const next = [...p.chords];
+        next[i] = nc;
+        return { ...p, chords: next, selected: id };
       });
       return;
     }
@@ -1463,6 +1548,13 @@ export default function App() {
       if (kind === 'dot') nc.dots = nc.dots.map(x => x.id === item.id ? item : x);
       if (kind === 'text') nc.texts = nc.texts.map(x => x.id === item.id ? item : x);
       if (kind === 'fing') nc.fingerings = nc.fingerings.map(x => x.id === item.id ? item : x);
+      // MIRROR mode: property edits propagate to the dot's ±12-fret twins on
+      // the same string (color / shape / text / font / size / rotation…).
+      if (kind === 'dot') {
+        const es = applyGlobalBoardScale(mergeChordSettings(settingsRef.current, nc.settings), settingsRef.current);
+        const edited = nc.dots.find(x => x.id === item.id);
+        if (edited) nc.dots = mirrorPropEdit(nc.dots, edited, es);
+      }
       if (JSON.stringify(nc) === JSON.stringify(p.chords[i])) return p;
       const next = [...p.chords];
       next[i] = nc;
@@ -1473,7 +1565,12 @@ export default function App() {
   const deleteEdit = () => {
     if (!editing) return;
     mutate(d => {
-      if (editing.kind === 'dot') d.dots = d.dots.filter(x => x.id !== editing.id);
+      if (editing.kind === 'dot') {
+        // MIRROR mode: deleting a dot from the dialog also deletes its
+        // ±12-fret same-string twins.
+        const anchor = d.dots.find(x => x.id === editing.id);
+        d.dots = anchor ? mirrorRemove(d.dots, anchor, eff) : d.dots.filter(x => x.id !== editing.id);
+      }
       if (editing.kind === 'text') d.texts = d.texts.filter(x => x.id !== editing.id);
       if (editing.kind === 'fing') d.fingerings = d.fingerings.filter(x => x.id !== editing.id);
       return d;
@@ -1945,6 +2042,10 @@ export default function App() {
                 <option key={i} value={i}>{i === 0 ? '+0 (same)' : `+${i} semitone${i === 1 ? '' : 's'}`}</option>
               ))}
             </select>
+            <button className={`qbtn wrap ${transposeWrap ? 'on' : ''}`}
+              data-tip={'Wrap octave: the NEXT transpose keeps every dot inside its own octave band — pitches pushed past fret 11/23 wrap back to the bottom of that octave ((fret mod 12) + 12·band), filling gaps instead of leaving them.\nE.g. a C scale run up to fret 11 transposed +5 wraps the high dots down, so F-major stays dense.\nOne-shot: it resets after each transpose.'}
+              title="Wrap octave — the next transpose folds wrapped dots back into their own octave band"
+              onClick={() => setTransposeWrap(w => !w)}>⟲ Wrap</button>
           </span>
         </div>
         <div className="toolbar right">
@@ -2201,6 +2302,12 @@ export default function App() {
                 <button className={`qbtn oct ${eff.octaveMode ? 'on' : ''}`} disabled={!hasSel}
                   data-tip={'Octave mode: while ON, every dot you add also drops ALL octaves of that pitch class that fit on the visible board (outside positions are clipped).\nUse ⤓ to strip octave duplicates of the whole shape.'}
                   onClick={() => setEffPatch({ octaveMode: !eff.octaveMode })}>8va</button>
+                <button className={`qbtn oct ${eff.mirrorOctaves && !eff.octaveMode ? 'on dimmed' : ''}`} disabled={!hasSel || eff.octaveMode}
+                  data-tip={eff.octaveMode
+                    ? 'Mirror octaves is covered by 8va mode — turn 8va off to use it.'
+                    : 'Mirror across octaves on the SAME string: every dot you add/remove/edit is mirrored to fret ±12·k (k = -5..5) on the same string — the identical pitch one or more octaves away. Edit once, every octave copy follows (adds, removes, colors, shapes, text). Fine-grained sibling of 8va (which spreads across strings).'}
+                  title="Mirror across octaves on same string (irrelevant while 8va is on)"
+                  onClick={() => setEffPatch({ mirrorOctaves: !eff.mirrorOctaves })}>8ve↔</button>
                 <button className="qbtn act" disabled={!hasSel || entry.dots.length === 0}
                   data-tip="Fill: add every missing octave of every sounding note within the visible frets (undoable)."
                   onClick={fillAllOctaves}>⤒</button>
