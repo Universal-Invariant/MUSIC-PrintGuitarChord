@@ -229,3 +229,14 @@ body { font-family: 'Segoe UI', Arial, sans-serif; background: #eceff3; color: #
   opacity: 0; visibility: hidden; transition: opacity .15s ease; pointer-events: none;
 }
 .qtip.show { opacity: 1; visibility: visible; }
+
+/* fine-control slider value box (commit-on-Enter) */
+.num-edit {
+  border: 1px solid #bbb;
+  border-radius: 4px;
+  padding: 2px 4px;
+  background: #fff;
+  color: #222;
+  font-variant-numeric: tabular-nums;
+}
+.num-edit:focus { outline: 2px solid #69b; border-color: #69b; }

@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import type { ChordColor, Margins, Settings } from '../lib/types';
-import { MIN_NUM_FRETS, clampNumFrets, nutShown } from '../lib/types';
+import { BOARD_SCALE_MIN, BOARD_SCALE_MAX, DOT_SIZE_MIN, DOT_SIZE_MAX, SHAPE_SCALE_MIN, SHAPE_SCALE_MAX, MIN_NUM_FRETS, clampNumFrets, nutShown } from '../lib/types';
 import { BASKET_COLORS, DEFAULT_COLORS, DEFAULT_SETTINGS } from '../lib/storage';
 import { STANDARD_SHAPES, sanitizeSvgInput } from '../lib/shapes';
 import { FONT_OPTIONS } from '../lib/render';
@@ -25,6 +25,65 @@ interface Props {
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return <details className="section"><summary>{title}</summary><div className="sec-body">{children}</div></details>;
+}
+
+/**
+ * Range slider with fine control + commit-on-Enter number field.
+ * - Dragging the slider uses `step` (coarse). Holding Shift while dragging or
+ *   pressing arrow keys uses `fineStep` (e.g. 0.1% of a scale value); holding
+ *   Ctrl/Cmd uses `finestStep` (0.01). Keyboard arrows always move by the
+ *   active step instead of the browser default.
+ * - The numeric readout is an editable text box: typing does NOT apply live —
+ *   the parsed value is clamped and committed on Enter/blur only (Esc cancels).
+ */
+function SliderRow({ label, min, max, step = 1, fineStep, finestStep, value, format, onChange }: {
+  label: React.ReactNode;
+  min: number; max: number; step?: number; fineStep?: number; finestStep?: number;
+  value: number;
+  format: (v: number) => string;
+  onChange: (v: number) => void;
+}) {
+  const fs = fineStep ?? step / 10;
+  const ffs = finestStep ?? step / 100;
+  const clamp = (v: number) => Math.max(min, Math.min(max, v));
+  const snap = (v: number, s: number) => clamp(Math.round(v / s) * s);
+  // keep float precision tidy (0.1+0.2 artifacts)
+  const fix = (v: number) => Number(v.toFixed(6));
+  const [text, setText] = useState<string | null>(null);
+  const shown = text ?? format(value);
+  const commitText = () => {
+    if (text === null) return;
+    const n = Number(text.replace(',', '.'));
+    setText(null);
+    if (Number.isFinite(n)) onChange(fix(clamp(n)));
+  };
+  const keyAdjust = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    // Override the native range-key behavior so Shift/Ctrl give sub-step resolution.
+    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight' && e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
+    e.preventDefault();
+    const dir = (e.key === 'ArrowRight' || e.key === 'ArrowUp') ? 1 : -1;
+    const s = e.ctrlKey || e.metaKey ? ffs : e.shiftKey ? fs : step;
+    onChange(fix(snap(value + dir * s, s)));
+  };
+  return <label className="row"><span>{label}</span>
+    <input type="range" min={min} max={max} step={step} value={value}
+      onKeyDown={keyAdjust}
+      onChange={e => {
+        const raw = Number(e.target.value);
+        const ne = e.nativeEvent as MouseEvent | KeyboardEvent;
+        const s = ne.shiftKey ? fs : ne.ctrlKey || ne.metaKey ? ffs : step;
+        onChange(fix(snap(raw, s)));
+      }} />
+    <input type="text" className="num-edit" style={{ width: 52, fontSize: 11 }} value={shown}
+      onClick={e => e.preventDefault()}
+      onChange={e => setText(e.target.value)}
+      onBlur={commitText}
+      onKeyDown={e => {
+        if (e.key === 'Enter') { e.preventDefault(); (e.target as HTMLInputElement).blur(); }
+        else if (e.key === 'Escape') setText(null);
+      }}
+      title="Type an exact value and press Enter to apply (Shift/Ctrl + arrow keys on the slider for fine steps)" />
+  </label>;
 }
 
 export default function SettingsPanel({ settings, onChange, customs, onCustomsChange, chordMode, extraActions, globalSettings, onGlobalChange }: Props) {
@@ -146,13 +205,13 @@ export default function SettingsPanel({ settings, onChange, customs, onCustomsCh
             <input type="number" step={0.2} min={0.2} max={12} value={s.maxStringWidth} onChange={e => set({ maxStringWidth: Number(e.target.value) })} /></label>
         </>}
         <div className="row"><span>Fretboard scale <em style={{ fontWeight: 400, fontSize: 10 }}>(global — all chords)</em></span></div>
-        <label className="row"><span>Board length (along frets)</span>
-          <input type="range" min={0.2} max={3} step={0.05} value={gs.boardLengthScale}
-            onChange={e => setGlobal({ boardLengthScale: Math.max(0.2, Math.min(3, Number(e.target.value) || 1)) })} /><b style={{ fontSize: 11 }}>{Math.round(gs.boardLengthScale * 100)}%</b></label>
-        <label className="row"><span>Board width (across strings)</span>
-          <input type="range" min={0.2} max={3} step={0.05} value={gs.boardWidthScale}
-            onChange={e => setGlobal({ boardWidthScale: Math.max(0.2, Math.min(3, Number(e.target.value) || 1)) })} /><b style={{ fontSize: 11 }}>{Math.round(gs.boardWidthScale * 100)}%</b></label>
-        <div className="mini-note">Stretches or squashes the fretboard rectangle along each axis (respects orientation). This is a GLOBAL setting applied before drawing — every chord on every page resizes together; dots, frets, nut and labels keep their relative positions and text stays undistorted.</div>
+        <SliderRow label="Board length (along frets)" min={BOARD_SCALE_MIN} max={BOARD_SCALE_MAX} step={0.05} fineStep={0.01} finestStep={0.001}
+          value={gs.boardLengthScale} format={v => `${Math.round(v * 100)}%`}
+          onChange={v => setGlobal({ boardLengthScale: v })} />
+        <SliderRow label="Board width (across strings)" min={BOARD_SCALE_MIN} max={BOARD_SCALE_MAX} step={0.05} fineStep={0.01} finestStep={0.001}
+          value={gs.boardWidthScale} format={v => `${Math.round(v * 100)}%`}
+          onChange={v => setGlobal({ boardWidthScale: v })} />
+        <div className="mini-note">Stretches or squashes the fretboard rectangle along each axis (respects orientation). This is a GLOBAL setting applied before drawing — every chord on every page resizes together; dots, frets, nut and labels keep their relative positions and text stays undistorted. Hold Shift while dragging/arrowing for 1% steps, Ctrl for 0.1%; type an exact % in the box and press Enter to apply.</div>
         <button className="btn small" onClick={() => setGlobal({ boardLengthScale: 1, boardWidthScale: 1 })}>⟲ Reset fretboard scale</button>
       </Section>
 
@@ -308,11 +367,15 @@ export default function SettingsPanel({ settings, onChange, customs, onCustomsCh
           {svgErr && <div className="err">{svgErr}</div>}
           <button className="btn small" onClick={addCustomShape}>Add shape</button>
         </fieldset>
-        <label className="row"><span>Dot base size (px) <em style={{ fontWeight: 400, fontSize: 10 }}>(global — all chords)</em></span>
-          <input type="range" min={12} max={48} value={gOf('baseDotSize')} onChange={e => setGlobal({ baseDotSize: Math.max(12, Math.min(48, Math.round(Number(e.target.value) || 12))) })} /></label>
-        <label className="row"><span>Shape scale <em style={{ fontWeight: 400, fontSize: 10 }}>(global — all chords)</em></span>
-          <input type="range" min={0.4} max={1.6} step={0.05} value={gOf('shapeScale')} onChange={e => setGlobal({ shapeScale: Math.max(0.4, Math.min(1.6, Number(e.target.value) || 1)) })} /></label>
-        <div className="mini-note">These two are GLOBAL: every note dot on EVERY chord resizes together — the change is pushed to all created chords immediately.</div>
+        <SliderRow label={<span>Dot base size (px) <em style={{ fontWeight: 400, fontSize: 10 }}>(global — all chords)</em></span>}
+          min={DOT_SIZE_MIN} max={DOT_SIZE_MAX} step={1} fineStep={0.5} finestStep={0.1}
+          value={gOf('baseDotSize')} format={v => `${v}`}
+          onChange={v => setGlobal({ baseDotSize: v })} />
+        <SliderRow label={<span>Shape scale <em style={{ fontWeight: 400, fontSize: 10 }}>(global — all chords)</em></span>}
+          min={SHAPE_SCALE_MIN} max={SHAPE_SCALE_MAX} step={0.05} fineStep={0.01} finestStep={0.001}
+          value={gOf('shapeScale')} format={v => `${Math.round(v * 100)}%`}
+          onChange={v => setGlobal({ shapeScale: v })} />
+        <div className="mini-note">These two are GLOBAL: every note dot on EVERY chord resizes together — the change is pushed to all created chords immediately. Hold Shift for 1% steps, Ctrl for 0.1%; type an exact value and press Enter.</div>
         <ColorPicker label="Shape default color" compact value={s.shapeDefaultColor} onChange={c => setColor('shapeDefaultColor', c)} />
       </Section>
 
