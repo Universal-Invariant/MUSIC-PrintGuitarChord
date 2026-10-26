@@ -219,13 +219,21 @@ export function normalizeChord(c: Partial<ChordDoc> & Record<string, unknown>): 
     fingerings: Array.isArray(c.fingerings) ? c.fingerings : [],
     settings: (c.settings && typeof c.settings === 'object') ? c.settings as Partial<Settings> : undefined,
   };
-  // GLOBAL-only settings (fretboard scale, dot sizing, text defaults) must
-  // never be shadowed by a stale per-chord patch — drop them on load so every
-  // chord follows the current global sliders / text defaults.
-  if (out.settings && GLOBAL_ONLY_SETTING_KEYS.some(k => k in out.settings!)) {
+  if (out.settings) {
     const p = { ...out.settings } as Record<string, unknown>;
-    for (const k of GLOBAL_ONLY_SETTING_KEYS) delete p[k];
-    out.settings = p as Partial<Settings>;
+    let dirty = false;
+    // GLOBAL-only settings (fretboard scale, dot sizing, text defaults) must
+    // never be shadowed by a stale per-chord patch — drop them on load so every
+    // chord follows the current global sliders / text defaults.
+    for (const k of GLOBAL_ONLY_SETTING_KEYS) {
+      if (k in p) { delete p[k]; dirty = true; }
+    }
+    // 'mirrorOctaves' is an app-wide EDITING behaviour switch now, not part of
+    // any chord's layout patch — drop legacy shadows so the single global
+    // toggle governs every chord on every page (otherwise a stale per-chord
+    // "false" could keep overriding the user's freshly enabled setting).
+    if ('mirrorOctaves' in p) { delete p.mirrorOctaves; dirty = true; }
+    if (dirty) out.settings = p as Partial<Settings>;
   }
   return out;
 }
