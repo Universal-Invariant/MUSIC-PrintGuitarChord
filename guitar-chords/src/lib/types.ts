@@ -618,6 +618,11 @@ export interface PageConfig {
    *  false (default) ⇒ collision detection keeps chord boxes from overlapping.
    *  Chords always stay inside the page bounds regardless of this flag. */
   allowOverlap: boolean;
+  /** true ⇒ "− Scale / ＋ Scale" work in ABSOLUTE mode: every chord is first
+   *  reset to the default scale (100%) and then scaled by the button factor,
+   *  so chords that started at the same size end up at the same size again.
+   *  false (default) ⇒ relative mode: each chord's own scale is multiplied. */
+  absoluteScale: boolean;
 }
 
 /** A page is a document too — it needs its own stable id (multi-page support). */

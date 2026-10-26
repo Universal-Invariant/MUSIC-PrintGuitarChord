@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as RMouseEvent } from 'react';
 import type { ChordDoc, ChordPlacement, Dot, PageConfig, PageDoc, Settings } from './lib/types';
 import {
-  GLOBAL_ONLY_SETTING_KEYS, MIN_NUM_FRETS, applyGlobalBoardScale, applyGlobalSettingsToAllChords,
-  chordPatchFrom, clampNumFrets, clampStartFret, fitsPage,
-  mergeChordSettings, pageSizePx, placementsOverlap, resolveCollision, snapVal, stripGlobalKeysFromChordDocs, uid,
+  CHORD_SETTING_KEYS, GLOBAL_ONLY_SETTING_KEYS, MIN_NUM_FRETS, applyGlobalBoardScale, applyGlobalSettingsToAllChords,
+  bakeInheritedItemsToAllChords, chordPatchFrom, clampNumFrets, clampStartFret, fitsPage,
+  mergeChordSettings, pageSizePx, placementsOverlap, resolveCollision, snapVal, stripGlobalKeysFromChordDocs,
+  syncKeysToAllChords, uid,
 } from './lib/types';
 import { composePage, cycleColorIndices, cycleShapeIndices, makeDot, renderSvg, svgInner } from './lib/render';
 import {
@@ -37,6 +38,27 @@ const jsonSnap = (v: unknown) => JSON.parse(JSON.stringify(v));
  *  actually changes, not on every unrelated settings edit. */
 function globalOnlyKey(s: Settings): string {
   return GLOBAL_ONLY_SETTING_KEYS.map(k => JSON.stringify(s[k])).join('|');
+}
+
+/** Text-default keys — when one of these changes, chord items that INHERIT
+ *  the default (font/size/color left null) must be re-baked so exports and
+ *  the print composer render with the current values. */
+const TEXT_DEFAULT_KEYS = [
+  'defaultTextFont', 'defaultTextColor', 'defaultTextSize', 'defaultTextRotation',
+] as const;
+
+/** Global-only keys that are ALWAYS synced into every chord patch whenever
+ *  the propagation pass runs (exports/print rely on patches being complete). */
+const SYNCED_GLOBAL_KEYS: readonly (keyof Settings)[] = GLOBAL_ONLY_SETTING_KEYS;
+
+/** Keys of `b` whose value differs from `a` (JSON-compared for objects). */
+function changedKeysOf(a: Settings, b: Settings): Set<keyof Settings> {
+  const out = new Set<keyof Settings>();
+  for (const k of Object.keys(b) as (keyof Settings)[]) {
+    const av = a[k] as unknown, bv = b[k] as unknown;
+    if ((typeof bv === 'object' ? JSON.stringify(av) !== JSON.stringify(bv) : av !== bv)) out.add(k);
+  }
+  return out;
 }
 
 export default function App() {
@@ -128,16 +150,27 @@ export default function App() {
       : GLOBAL_ONLY_SETTING_KEYS;
     return keys.map(k => JSON.stringify(s[k])).join('|');
   }
+  // Baseline snapshot of the settings used to diff WHICH keys changed since
+  // the last propagation pass (kept in a ref so it never triggers renders).
+  const prevSnapRef = useRef<Settings | null>(null);
   const prevPropKeyRef = useRef<string>('');
+  // Live mirror of the selected chord's effective settings — in apply-to-all
+  // mode, edits made on a chord broadcast THAT chord's value to every chord
+  // ("make all chords look like this one"), not the app-wide default.
+  const effRef = useRef<Settings>(settings); useEffect(() => { effRef.current = eff; }, [eff]);
   const propKeyStr = propagationKey(settings);
   useEffect(() => {
     // First run after mount / toggle flip: just record the baseline — no
     // retroactive broadcast (the toggle must not flood history with an undo
     // step for edits that happened before it was turned on).
-    if (!prevPropKeyRef.current) { prevPropKeyRef.current = propKeyStr; return; }
+    if (!prevSnapRef.current || !prevPropKeyRef.current) {
+      prevSnapRef.current = jsonSnap(settings);
+      prevPropKeyRef.current = propKeyStr;
+      return;
+    }
     const first = prevPropKeyRef.current !== propKeyStr && !applyAllRef.current;
     prevPropKeyRef.current = propKeyStr;
-    if (!applyAllRef.current && !first) return; // selected-only mode: nothing to do
+    if (!applyAllRef.current && !first) { prevSnapRef.current = jsonSnap(settings); return; } // selected-only mode: nothing to do
     pushHistory();
     const src = settingsRef.current;
     // Which patch keys each chord receives:
@@ -147,17 +180,18 @@ export default function App() {
     //    is synced too — from the GLOBAL defaults when editing globally, or
     //    from the selected chord's effective settings when editing a chord
     //    ("make all chords look like this one").
-    const gChanged = GLOBAL_ONLY_SETTING_KEYS.filter(k => first || changedKeysOf(prevSnapRef.current, src).has(k));
+    const gChanged = GLOBAL_ONLY_SETTING_KEYS.filter(k => first || changedKeysOf(prevSnapRef.current!, src).has(k));
     let keys: (keyof Settings)[] = [...new Set<(keyof Settings)>([...SYNCED_GLOBAL_KEYS, ...gChanged])];
     let valueSrc: Settings = src;
     if (!first && applyAllRef.current) {
-      const ch = CHORD_SETTING_KEYS.filter(k => changedKeysOf(prevSnapRef.current, src).has(k));
+      const ch = CHORD_SETTING_KEYS.filter(k => changedKeysOf(prevSnapRef.current!, src).has(k));
       if (ch.length) {
         if (selectedId && entry) { keys = [...keys, ...ch]; valueSrc = effRef.current; }
         else keys = [...keys, ...ch];
       }
     }
-    const textDefaultEdited = keys.some(k => TEXT_DEFAULT_KEYS.includes(k as GlobalOnlyTextKey));
+    prevSnapRef.current = jsonSnap(settings);
+    const textDefaultEdited = keys.some(k => (TEXT_DEFAULT_KEYS as readonly string[]).includes(k as string));
     const applyTo = (list: ChordDoc[]): ChordDoc[] => {
       let out = syncKeysToAllChords(list, valueSrc, keys);
       if (textDefaultEdited) out = bakeInheritedItemsToAllChords(out, valueSrc);
@@ -1396,13 +1430,19 @@ export default function App() {
     if (!page) return;
     pushHistory();
     const ps = pageSizePx(page.config);
+    // Absolute mode: every chord is FIRST reset to the default scale (100%)
+    // and only then multiplied by k — so chords that started at the same size
+    // always end up at exactly the same size again (repeated clicks of ＋ give
+    // a stable 1.1×, not a compounding drift from mismatched starting scales).
+    const absolute = !!page.config.absoluteScale;
     setPage(p => {
       for (const c of p.chords) {
         const es = applyGlobalBoardScale(mergeChordSettings(settings, c.settings), settings);
         const nat = canvasSize(es);
         const pl = p.placements[c.id];
         if (!pl) continue;
-        pl.scale = Math.max(0.2, Math.min(3, +(pl.scale * k).toFixed(3)));
+        const base = absolute ? 1 : pl.scale;
+        pl.scale = Math.max(0.2, Math.min(3, +(base * k).toFixed(3)));
         pl.w = Math.round(nat.w);
         pl.h = Math.round(nat.h);
         pl.x = Math.max(0, Math.min(Math.max(0, ps.w - nat.w * pl.scale), pl.x));
@@ -1411,6 +1451,7 @@ export default function App() {
       if (!p.config.allowOverlap) p = ensureNoOverlaps(p);   // scaled boxes may now collide
       return p;
     });
+    flash(absolute ? `All chords set to ${Math.round(k * 100)}% (absolute)` : `All chords scaled ${k > 1 ? 'up' : 'down'} ${Math.round(Math.abs(k - 1) * 100)}%`);
   };
 
   const scaleToDefault = () => {
@@ -1625,6 +1666,12 @@ export default function App() {
           <button className={`btn tool ${tool === 'text' ? 'active' : ''}`} onClick={() => setTool('text')} title="Click anywhere to add a free text box [2]">T Text</button>
           <button className={`btn tool ${tool === 'fing' ? 'active' : ''}`} onClick={() => setTool('fing')} title="Click a string at the far end of the fretboard (opposite the nut) to add a fingering label [3]">① Fingering</button>
           <button className={`btn tool ${tool === 'select' ? 'active' : ''}`} onClick={() => setTool('select')} title="Select & drag text boxes, Alt+click / right-click to edit [4]">⇗ Select</button>
+          <button className={`btn apply-all ${applyAllChords ? 'active' : ''}`} onClick={toggleApplyAll}
+            title={applyAllChords
+              ? 'Apply-to-ALL is ON: every Settings change is broadcast to every chord on every page (and the saved library). Click to edit only the selected chord.'
+              : 'Apply-to-ALL is OFF: settings edits affect only the selected chord. Click to make every setting change apply to ALL chords.'}>
+            {applyAllChords ? '🌐 All chords' : '🎯 Selected'}
+          </button>
         </div>
         <div className="toolbar right">
           <button className="btn" onClick={undo} disabled={!canUndo} title={`Undo (Ctrl+Z) — ${hist.undoCount()} step(s)`}>↩ Undo</button>
@@ -1688,6 +1735,7 @@ export default function App() {
               <label className="row check"><input type="checkbox" checked={page.config.showGrid} onChange={e => setConfig({ showGrid: e.target.checked })} /><span>Show grid</span></label>
               <label className="row check"><input type="checkbox" checked={page.config.snap} onChange={e => setConfig({ snap: e.target.checked })} /><span>Snap to grid</span></label>
               <label className="row check"><input type="checkbox" checked={!page.config.allowOverlap} onChange={e => setConfig({ allowOverlap: !e.target.checked })} /><span>Prevent overlap</span></label>
+              <label className="row check"><input type="checkbox" checked={!!page.config.absoluteScale} onChange={e => setConfig({ absoluteScale: e.target.checked })} /><span>Absolute scale</span></label>
               <label className="row"><span>Grid (px)</span><input type="number" min={5} max={100} value={page.config.gridSize}
                 onChange={e => setConfig({ gridSize: Math.max(5, Math.min(100, Number(e.target.value) || 20)) })} /></label>
               <div className="page-ops">
@@ -1695,8 +1743,8 @@ export default function App() {
                 <button className="btn small" onClick={refitChords} title="Re-measure chord boxes and pull them back inside the page">⇲ Refit boxes</button>
               </div>
               <div className="page-ops">
-                <button className="btn small" onClick={() => scaleAll(0.9)} title="Scale ALL chords down 10%">− Scale</button>
-                <button className="btn small" onClick={() => scaleAll(1.1)} title="Scale ALL chords up 10%">＋ Scale</button>
+                <button className="btn small" onClick={() => scaleAll(0.9)} title="Scale ALL chords down 10% (absolute mode: reset to 100% first, then set 90%)">− Scale</button>
+                <button className="btn small" onClick={() => scaleAll(1.1)} title="Scale ALL chords up 10% (absolute mode: reset to 100% first, then set 110%)">＋ Scale</button>
                 <button className="btn small" onClick={() => scaleToDefault()} title="Reset ALL chord scales back to 100%">⟲ Reset scale</button>
               </div>
             </details>
