@@ -1309,6 +1309,27 @@ export default function App() {
     });
   };
 
+  const scaleToDefault = () => {
+    if (!page) return;
+    pushHistory();
+    const ps = pageSizePx(page.config);
+    setPage(p => {
+      for (const c of p.chords) {
+        const es = mergeChordSettings(settings, c.settings);
+        const nat = canvasSize(es);
+        const pl = p.placements[c.id];
+        if (!pl) continue;
+        pl.scale = 1;
+        pl.w = Math.round(nat.w);
+        pl.h = Math.round(nat.h);
+        pl.x = Math.max(0, Math.min(Math.max(0, ps.w - nat.w), pl.x));
+        pl.y = Math.max(0, Math.min(Math.max(0, ps.h - nat.h), pl.y));
+      }
+      return p;
+    });
+    flash('All chord scales reset to 100%');
+  };
+
   // ---------- auto-layout (pack all chords into rows/pages) ----------
   const buildAutoLayout = (): PageDoc[] => {
     if (!page) return [];
@@ -1570,6 +1591,7 @@ export default function App() {
               <div className="page-ops">
                 <button className="btn small" onClick={() => scaleAll(0.9)} title="Scale ALL chords down 10%">− Scale</button>
                 <button className="btn small" onClick={() => scaleAll(1.1)} title="Scale ALL chords up 10%">＋ Scale</button>
+                <button className="btn small" onClick={() => scaleToDefault()} title="Reset ALL chord scales back to 100%">⟲ Reset scale</button>
               </div>
             </details>
           </div>
