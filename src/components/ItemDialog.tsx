@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import type { ChordColor, Dot, Fingering, Settings, TextBox } from '../lib/types';
 import { uid } from '../lib/types';
 import { FONT_OPTIONS } from '../lib/render';
@@ -18,7 +18,17 @@ interface Props {
 }
 
 export default function ItemDialog({ kind, item, settings, customs, onApply, onDelete, onClose }: Props) {
+  // `item` is replaced (new identity) whenever a different dot/text/fingering
+  // is opened or the document changes — reload the draft from it so the text
+  // field always shows the values of the item being edited. A ref tracks the
+  // last loaded id so in-progress edits are not clobbered while editing the
+  // same item.
   const [draft, setDraft] = useState<any>(() => structuredClone(item));
+  const loadedId = useRef<string>(item.id);
+  if (loadedId.current !== item.id) {
+    loadedId.current = item.id;
+    setDraft(structuredClone(item));
+  }
   const s = settings;
 
   const patch = (p: any) => setDraft((d: any) => ({ ...d, ...p }));

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as RMouseEvent } from 'react';
-import type { ChordDoc, ChordPlacement, Dot, PageConfig, PageDoc, Settings } from './lib/types';
+import type { ChordDoc, ChordPlacement, Dot, PageConfig, PageDoc, Settings, TextBox } from './lib/types';
 import {
   CHORD_SETTING_KEYS, GLOBAL_ONLY_SETTING_KEYS, MIN_NUM_FRETS, applyGlobalBoardScale, applyGlobalSettingsToAllChords,
   bakeInheritedItemsToAllChords, chordPatchFrom, clampNumFrets, clampStartFret, fitsPage,
@@ -25,6 +25,26 @@ import ItemDialog, { newFingering, newText } from './components/ItemDialog';
 
 type Tool = 'dot' | 'text' | 'fing' | 'select';
 type Sel = { kind: 'dot' | 'text' | 'fing'; id: string } | null;
+
+/** Approximate on-canvas width of a rendered text box (SVG has no layout API;
+ *  average glyph advance ≈ 0.56 × font size is close enough for hit-testing). */
+const TEXT_AVG_CHAR_W = 0.56;
+
+/** Distance from a canvas-space point to a text box's rendered extent, using a
+ *  generous rectangular hit area that follows the same font/size/anchor rules
+ *  as the renderer (inheritable fields resolve against the global defaults).
+ *  Returns Infinity-safe value comparable against the pick radius. */
+function textHitDist(t: TextBox, s: Settings, w: number, h: number, x: number, y: number): number {
+  const cx = t.x * w, cy = t.y * h;
+  const size = t.size ?? s.defaultTextSize ?? 14;
+  const tw = Math.max(size, (t.text?.length ?? 0) * size * TEXT_AVG_CHAR_W);
+  const th = size * 1.3;
+  const anchor = t.anchor ?? 'middle';
+  const left = anchor === 'start' ? cx - tw * 0.1 : anchor === 'end' ? cx - tw * 0.9 : cx - tw / 2;
+  const dx = x < left ? left - x : x > left + tw ? x - (left + tw) : 0;
+  const dy = Math.abs(y - cy); // vertically centered (dominant-baseline: central)
+  return Math.hypot(dx, dy);
+}
 
 /** Intrinsic size of a chord SVG (renderSvg embeds data-w / data-h). */
 function intrinsic(markup: string): { w: number; h: number } {
@@ -690,6 +710,14 @@ export default function App() {
     if (tool === 'dot' && hit) { toggleDotAt(hit, e, cid); return true; }
 
     if (tool === 'text') {
+      // Clicking ON an existing text box with the Text tool edits that box
+      // instead of stacking a new one on top of it.
+      const existing = pickItemAt(cid, x, y);
+      if (existing && existing.kind === 'text') {
+        setSel(existing);
+        setEditing(existing);
+        return true;
+      }
       const t = newText(es, x / sz.w, y / sz.h);
       mutateOn(cid, d => { d.texts.push(t); return d; });
       setSel({ kind: 'text', id: t.id });
@@ -750,7 +778,7 @@ export default function App() {
       if (dist < best.d) best = { d: dist, sel: { kind: 'dot', id: d.id } };
     }
     for (const t of entry.texts) {
-      const dist = Math.hypot(t.x * size.w - x, t.y * size.h - y);
+      const dist = textHitDist(t, eff, size.w, size.h, x, y);
       if (dist < best.d) best = { d: dist, sel: { kind: 'text', id: t.id } };
     }
     for (const f of entry.fingerings) {
@@ -798,7 +826,7 @@ export default function App() {
       if (dist < best.d) best = { d: dist, sel: { kind: 'dot', id: d.id } };
     }
     for (const t of ctx.doc.texts) {
-      const dist = Math.hypot(t.x * ctx.w - x, t.y * ctx.h - y);
+      const dist = textHitDist(t, es, ctx.w, ctx.h, x, y);
       if (dist < best.d) best = { d: dist, sel: { kind: 'text', id: t.id } };
     }
     for (const f of ctx.doc.fingerings) {
@@ -1239,12 +1267,22 @@ export default function App() {
 
   // ---------- dialog apply ----------
   const applyEdit = (kind: 'dot' | 'text' | 'fing', item: any) => {
-    mutate(d => {
-      if (kind === 'dot') d.dots = d.dots.map(x => x.id === item.id ? item : x);
-      if (kind === 'text') d.texts = d.texts.map(x => x.id === item.id ? item : x);
-      if (kind === 'fing') d.fingerings = d.fingerings.map(x => x.id === item.id ? item : x);
-      return d;
-    });
+    // Edit the item wherever it lives — on ANY page, not just the current one.
+    // (Inline editing lets you open a chord on another page; previously the
+    // dialog wrote only into the active page and silently dropped the edit.)
+    pushHistory();
+    setPages(list => list.map(p => {
+      const i = p.chords.findIndex(c => c.id === selectedId);
+      if (i < 0) return p;
+      const nc = structuredClone(p.chords[i]);
+      if (kind === 'dot') nc.dots = nc.dots.map(x => x.id === item.id ? item : x);
+      if (kind === 'text') nc.texts = nc.texts.map(x => x.id === item.id ? item : x);
+      if (kind === 'fing') nc.fingerings = nc.fingerings.map(x => x.id === item.id ? item : x);
+      if (JSON.stringify(nc) === JSON.stringify(p.chords[i])) return p;
+      const next = [...p.chords];
+      next[i] = nc;
+      return { ...p, chords: next };
+    }));
     setEditing(null);
   };
   const deleteEdit = () => {
