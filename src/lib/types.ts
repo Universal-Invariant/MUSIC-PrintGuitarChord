@@ -281,7 +281,13 @@ export const CHORD_SETTING_KEYS: (keyof Settings)[] = [
   'nutWidth', 'fretThickness', 'reverseStrings', 'boardTaper', 'taperMode',
   'fretLabels', 'fretLabelList', 'openSide', 'margins', 'spacing',
   'firstFretSize', 'lastFretSize', 'showDots', 'noteVisible', 'dotTextColor',
-  'noteLabelMode', 'noteRootPc', 'noteKey', 'octaveMode', 'mirrorOctaves',
+  'noteLabelMode', 'noteRootPc', 'noteKey', 'octaveMode',
+  // NOTE: 'mirrorOctaves' is intentionally NOT part of the per-chord patch.
+  // It is an EDITING BEHAVIOUR flag (how dot edits propagate to ±12-fret
+  // twins), not a layout property — mirroring happens live while editing, so
+  // baking it into every chord's patch would silently rewrite dozens of saved
+  // layouts and could never be undone per chord. It lives in the app-wide
+  // settings instead, where one switch governs every chord on every page.
   'openNoteLabels', 'openNoteOffset', 'tuning', 'preferFlats',
   'dotMarkerColor', 'bgFill', 'fretColor', 'stringColor',
   'fretWidthPct',
