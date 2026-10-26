@@ -228,11 +228,6 @@ export function normalizeChord(c: Partial<ChordDoc> & Record<string, unknown>): 
     for (const k of GLOBAL_ONLY_SETTING_KEYS) {
       if (k in p) { delete p[k]; dirty = true; }
     }
-    // 'mirrorOctaves' is an app-wide EDITING behaviour switch now, not part of
-    // any chord's layout patch — drop legacy shadows so the single global
-    // toggle governs every chord on every page (otherwise a stale per-chord
-    // "false" could keep overriding the user's freshly enabled setting).
-    if ('mirrorOctaves' in p) { delete p.mirrorOctaves; dirty = true; }
     if (dirty) out.settings = p as Partial<Settings>;
   }
   return out;
