@@ -132,6 +132,15 @@ export default function SettingsPanel({ settings, onChange, customs, onCustomsCh
           <label className="row"><span>Max string width</span>
             <input type="number" step={0.2} min={0.2} max={12} value={s.maxStringWidth} onChange={e => set({ maxStringWidth: Number(e.target.value) })} /></label>
         </>}
+        <div className="row"><span>Fretboard scale</span></div>
+        <label className="row"><span>Board length (along frets)</span>
+          <input type="range" min={0.2} max={3} step={0.05} value={s.boardLengthScale}
+            onChange={e => set({ boardLengthScale: Math.max(0.2, Math.min(3, Number(e.target.value) || 1)) })} /><b style={{ fontSize: 11 }}>{Math.round(s.boardLengthScale * 100)}%</b></label>
+        <label className="row"><span>Board width (across strings)</span>
+          <input type="range" min={0.2} max={3} step={0.05} value={s.boardWidthScale}
+            onChange={e => set({ boardWidthScale: Math.max(0.2, Math.min(3, Number(e.target.value) || 1)) })} /><b style={{ fontSize: 11 }}>{Math.round(s.boardWidthScale * 100)}%</b></label>
+        <div className="mini-note">Stretches or squashes the fretboard rectangle along each axis (respects orientation). This is a coordinate scale applied before drawing — dots, frets, nut and labels keep their relative positions and text stays undistorted.</div>
+        <button className="btn small" onClick={() => set({ boardLengthScale: 1, boardWidthScale: 1 })}>⟲ Reset fretboard scale</button>
       </Section>
 
       <Section title="Nut, taper & fret spacing">
