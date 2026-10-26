@@ -8,7 +8,8 @@
 import type { ChordColor, ChordDoc, Dot, Settings } from './types';
 import { col, uid } from './types';
 import { isHiddenRel, nutShown } from './types';
-import { pitchAtRel, midiToName, TUNING_HIGH_TO_LOW } from './music';
+import { pitchAtRel, midiToName, computeDotLabel, TUNING_HIGH_TO_LOW } from './music';
+import type { LabelCtx } from './music';
 import {
   boardAcross, canvasSize, cellCenter, farBand, fingeringPos,
   fretLength, fretPositions, halfWidthAlong, nutZoneDepth,
@@ -153,10 +154,21 @@ export function renderSvg(doc: ChordDoc, settings: Settings, opts: RenderOpts & 
   parts.push(renderFingerings(doc, s));
 
   // ----- note dots (skipping any outside the visible fret range) -----
+  // When a NON-letter label mode is active, build the whole-shape context once
+  // (root derivation needs every sounding dot of this chord).
+  const labelCtx: LabelCtx | undefined = s.noteVisible && s.noteLabelMode !== 'letter'
+    ? {
+        mode: s.noteLabelMode,
+        soundingAbs: doc.dots.map(d => ({ string: d.string, abs: d.fret })),
+        tuning: s.tuning, startFret: s.startFret, preferFlats: !!s.preferFlats,
+        rootPc: s.noteRootPc >= 0 ? s.noteRootPc : null,
+        key: s.noteKey || null,
+      }
+    : undefined;
   for (const d of doc.dots) {
     const rel = d.fret - s.startFret;
     if (isHiddenRel(s, rel)) continue;
-    parts.push(renderDot(d, s, customMap));
+    parts.push(renderDot(d, s, customMap, labelCtx));
   }
 
   // ----- free text boxes -----
@@ -267,7 +279,7 @@ function renderFingerings(doc: ChordDoc, s: Settings): string {
   return out.join('');
 }
 
-export function renderDot(d: Dot, s: Settings, customs: Record<string,string> = {}): string {
+export function renderDot(d: Dot, s: Settings, customs: Record<string,string> = {}, ctx?: LabelCtx): string {
   const rel = relOf(s, d.fret);
   const c = cellCenter(s, d.string, rel);
   const size = s.baseDotSize * (d.textSize != null ? Math.max(0.3, d.textSize) : 1);
@@ -280,12 +292,15 @@ export function renderDot(d: Dot, s: Settings, customs: Record<string,string> = 
   const glyphScale = (size * s.shapeScale) / 100;
   const rot = d.rotation || 0;
 
-  // NOTE-VISIBLE mode: automatically show the pitch of the dot position, computed
-  // from the string tuning and the offset into the string (relative fret, which
-  // uses startFret). A manually typed text always wins over the auto pitch.
-  const label = d.text.trim()
-    ? d.text
-    : (s.noteVisible ? pitchAtRel(s.tuning, d.string, rel, !!s.preferFlats, s.startFret) : '');
+  // NOTE-VISIBLE mode: automatically label the dot. The label follows the
+  // note-label MODE (letter pitch / interval from root / tonal degrees of a
+  // key / chromatic degree with root = 1), computed from the string tuning and
+  // the absolute fret. A manually typed text always wins over the auto label.
+  const autoLabel = !s.noteVisible ? ''
+    : (ctx && ctx.mode !== 'letter'
+        ? computeDotLabel(d.string, d.fret, ctx)
+        : pitchAtRel(s.tuning, d.string, rel, !!s.preferFlats, s.startFret));
+  const label = d.text.trim() ? d.text : autoLabel;
 
   const out: string[] = [];
   out.push(`<g transform="translate(${c.x.toFixed(1)},${c.y.toFixed(1)}) rotate(${rot})">`);

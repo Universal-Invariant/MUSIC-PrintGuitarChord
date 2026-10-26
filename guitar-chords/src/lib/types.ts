@@ -105,6 +105,17 @@ export interface Settings {
   noteVisible: boolean;      // true ⇒ every note dot automatically shows its pitch
                              // (computed from the string tuning + absolute fret);
                              // a manually typed dot text still wins over the pitch.
+  noteLabelMode: 'letter' | 'interval' | 'tonal' | 'degree';
+                             // WHICH label note-visible mode draws:
+                             //  letter   = actual pitch names (A, Bb, F# …)
+                             //  interval = distance from the root (R, m3, P5 …)
+                             //  tonal    = scale degrees of the key (1, b3, #4 …)
+                             //  degree   = chromatic numbering, root = 1 .. 12
+  noteRootPc: number;        // -1 ⇒ auto (lowest sounding note of the shape),
+                             // otherwise an explicit reference pitch class 0..11
+  noteKey: string;           // '' ⇒ auto (root major); e.g. "F", "Dm", "Bb min"
+  octaveMode: boolean;       // true ⇒ adding a note also adds EVERY octave of it
+                             // that falls inside the visible fret range
   dotTextColor: ChordColor;  // color used for those automatic pitch labels
   openNoteLabels: boolean;   // true ⇒ the open-string pitch ring (e B G D A E) is shown
   openNoteOffset: number;    // px — extra distance of that ring away from the board,
@@ -212,6 +223,7 @@ export const CHORD_SETTING_KEYS: (keyof Settings)[] = [
   'nutWidth', 'fretThickness', 'reverseStrings', 'boardTaper', 'taperMode',
   'fretLabels', 'fretLabelList', 'openSide', 'margins', 'spacing',
   'firstFretSize', 'lastFretSize', 'showDots', 'noteVisible', 'dotTextColor',
+  'noteLabelMode', 'noteRootPc', 'noteKey', 'octaveMode',
   'openNoteLabels', 'openNoteOffset', 'tuning', 'preferFlats',
   'dotMarkerColor', 'bgFill', 'fretColor', 'stringColor',
   'baseDotSize', 'shapeScale', 'fretWidthPct', 'defaultTextFont', 'defaultTextColor',

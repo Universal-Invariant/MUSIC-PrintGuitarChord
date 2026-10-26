@@ -14,7 +14,8 @@ import {
   loadActivePageId, loadChordList, loadCustomShapes, loadPages, loadSettings, packRows,
   paginateRows, saveActivePageId, saveChordList, saveCustomShapes, savePages, saveSettings,
 } from './lib/storage';
-import { CHORD_LIBRARY, analyzeChord, chordMatchesQuery, suggestNoteNames } from './lib/music';
+import { CHORD_LIBRARY, analyzeChord, chordMatchesQuery, enumerateOctavePositions, shapePitchClasses, shapeRootPc, suggestNoteNames } from './lib/music';
+import type { NoteLabelMode } from './lib/music';
 import { HistoryManager } from './lib/history';
 import SettingsPanel from './components/SettingsPanel';
 import ItemDialog, { newFingering, newText } from './components/ItemDialog';
@@ -363,6 +364,14 @@ export default function App() {
       }
       if (existing) return { ...d, dots: d.dots.filter(dd => dd.id !== existing.id) };
       d.dots.push(makeDot(es, hit.string, hit.rel));
+      // OCTAVE MODE: also drop every octave of the new note that falls inside
+      // the visible fret range (positions outside startFret..last are clipped).
+      if (es.octaveMode) {
+        const pc = (((es.tuning[hit.string] ?? 64) + Math.max(0, hit.rel + es.startFret)) % 12 + 12) % 12;
+        for (const pos of enumerateOctavePositions(new Set([pc]), d.dots, es)) {
+          d.dots.push(makeDot(es, pos.string, pos.fret - es.startFret));
+        }
+      }
       return d;
     });
   };
