@@ -222,10 +222,12 @@ export function clampStartFret(v: number): number {
 // so every chord can have its own starting fret / frets displayed / taper /
 // spacing etc., while shared data (color basket, shape list) stays global.
 
-/** The keys that make up the per-chord geometry/appearance patch. */
+/** The keys that make up the per-chord geometry/appearance patch.
+ *  NOTE: boardLengthScale / boardWidthScale are intentionally EXCLUDED —
+ *  the fretboard scale is a GLOBAL setting that applies to every chord. */
 export const CHORD_SETTING_KEYS: (keyof Settings)[] = [
   'numFrets', 'startFret', 'orientation', 'flipAlong', 'flipAcross',
-  'fretSpacing', 'stringGap', 'boardLengthScale', 'boardWidthScale',
+  'fretSpacing', 'stringGap',
   'stringWidthMode', 'minStringWidth', 'maxStringWidth',
   'nutWidth', 'fretThickness', 'reverseStrings', 'boardTaper', 'taperMode',
   'fretLabels', 'fretLabelList', 'openSide', 'margins', 'spacing',
@@ -250,6 +252,15 @@ export function chordPatchFrom(s: Settings): ChordSettingsPatch {
 export function mergeChordSettings(base: Settings, patch?: Partial<Settings>): Settings {
   if (!patch) return base;
   return { ...base, ...structuredClone(patch) };
+}
+
+/** The fretboard scale is GLOBAL: it always comes from the user's global
+ *  settings and overrides any per-chord patch value, so changing it once
+ *  affects every chord on every page. */
+export function applyGlobalBoardScale(eff: Settings, global: Settings): Settings {
+  eff.boardLengthScale = global.boardLengthScale;
+  eff.boardWidthScale = global.boardWidthScale;
+  return eff;
 }
 
 /** Normalized chord id accessor — old saved data may lack `id`. */

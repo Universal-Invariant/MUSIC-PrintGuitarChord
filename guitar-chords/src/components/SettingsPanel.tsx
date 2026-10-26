@@ -16,15 +16,24 @@ interface Props {
   chordMode?: boolean;
   /** Extra actions rendered at the top of the per-chord panel (copy/paste settings). */
   extraActions?: React.ReactNode;
+  /** Global (non-per-chord) settings — the fretboard scale lives here so it
+   *  applies to EVERY chord on every page. Provided together with
+   *  onGlobalChange when the app is in per-chord editing mode. */
+  globalSettings?: Settings;
+  onGlobalChange?: (s: Settings) => void;
 }
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return <details className="section"><summary>{title}</summary><div className="sec-body">{children}</div></details>;
 }
 
-export default function SettingsPanel({ settings, onChange, customs, onCustomsChange, chordMode, extraActions }: Props) {
+export default function SettingsPanel({ settings, onChange, customs, onCustomsChange, chordMode, extraActions, globalSettings, onGlobalChange }: Props) {
   const s = settings;
   const set = (patch: Partial<Settings>) => onChange({ ...s, ...patch });
+  // Fretboard scale is GLOBAL — even while editing one chord's patch, these
+  // sliders write to the app-wide settings so all boards resize together.
+  const gs = globalSettings ?? s;
+  const setGlobal = (patch: Partial<Settings>) => (onGlobalChange ?? onChange)({ ...gs, ...patch });
   const setColor = (key: keyof Settings, c: ChordColor) => set({ [key]: c } as Partial<Settings>);
 
   // --- color basket helpers ---
@@ -132,15 +141,15 @@ export default function SettingsPanel({ settings, onChange, customs, onCustomsCh
           <label className="row"><span>Max string width</span>
             <input type="number" step={0.2} min={0.2} max={12} value={s.maxStringWidth} onChange={e => set({ maxStringWidth: Number(e.target.value) })} /></label>
         </>}
-        <div className="row"><span>Fretboard scale</span></div>
+        <div className="row"><span>Fretboard scale <em style={{ fontWeight: 400, fontSize: 10 }}>(global — all chords)</em></span></div>
         <label className="row"><span>Board length (along frets)</span>
-          <input type="range" min={0.2} max={3} step={0.05} value={s.boardLengthScale}
-            onChange={e => set({ boardLengthScale: Math.max(0.2, Math.min(3, Number(e.target.value) || 1)) })} /><b style={{ fontSize: 11 }}>{Math.round(s.boardLengthScale * 100)}%</b></label>
+          <input type="range" min={0.2} max={3} step={0.05} value={gs.boardLengthScale}
+            onChange={e => setGlobal({ boardLengthScale: Math.max(0.2, Math.min(3, Number(e.target.value) || 1)) })} /><b style={{ fontSize: 11 }}>{Math.round(gs.boardLengthScale * 100)}%</b></label>
         <label className="row"><span>Board width (across strings)</span>
-          <input type="range" min={0.2} max={3} step={0.05} value={s.boardWidthScale}
-            onChange={e => set({ boardWidthScale: Math.max(0.2, Math.min(3, Number(e.target.value) || 1)) })} /><b style={{ fontSize: 11 }}>{Math.round(s.boardWidthScale * 100)}%</b></label>
-        <div className="mini-note">Stretches or squashes the fretboard rectangle along each axis (respects orientation). This is a coordinate scale applied before drawing — dots, frets, nut and labels keep their relative positions and text stays undistorted.</div>
-        <button className="btn small" onClick={() => set({ boardLengthScale: 1, boardWidthScale: 1 })}>⟲ Reset fretboard scale</button>
+          <input type="range" min={0.2} max={3} step={0.05} value={gs.boardWidthScale}
+            onChange={e => setGlobal({ boardWidthScale: Math.max(0.2, Math.min(3, Number(e.target.value) || 1)) })} /><b style={{ fontSize: 11 }}>{Math.round(gs.boardWidthScale * 100)}%</b></label>
+        <div className="mini-note">Stretches or squashes the fretboard rectangle along each axis (respects orientation). This is a GLOBAL setting applied before drawing — every chord on every page resizes together; dots, frets, nut and labels keep their relative positions and text stays undistorted.</div>
+        <button className="btn small" onClick={() => setGlobal({ boardLengthScale: 1, boardWidthScale: 1 })}>⟲ Reset fretboard scale</button>
       </Section>
 
       <Section title="Nut, taper & fret spacing">
