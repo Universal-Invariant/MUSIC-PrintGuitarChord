@@ -382,26 +382,24 @@ export default function App() {
   const [transposeWrap, setTransposeWrap] = useState(false);
   const transposeWrapRef = useRef(transposeWrap);
   useEffect(() => { transposeWrapRef.current = transposeWrap; }, [transposeWrap]);
-  /** Transpose EVERY sounding pitch of one chord up by n semitones — purely by
-   *  modifying values in place (per-chord tuning, dot frets, explicit root/key,
-   *  custom dot texts and auto note labels), never as a stored/render-time
-   *  "transpose" setting. Open-string pitch names and letter-mode dot labels
-   *  are DERIVED from `tuning` at draw time, so shifting the tuning array
-   *  shifts them automatically — nothing to bake there. When `wrap` is true
-   *  each dot's new fret wraps WITHIN ITS OWN OCTAVE BAND (see above). */
+  /** Transpose the PITCHES of one chord up by n semitones — purely by
+   *  modifying values in place (dot frets, explicit root/key, custom dot
+   *  texts and auto note labels), never as a stored/render-time "transpose"
+   *  setting. The guitar ITSELF is never touched: the tuning (open-string
+   *  pitches, shared or per-chord) stays exactly as-is, so the open-string
+   *  note ring keeps showing the real tuning. Because every sounding pitch
+   *  is `tuning[string] + fret`, shifting only the DOT FRETS by +n
+   *  transposes all played pitches while leaving the instrument unchanged.
+   *  Letter-mode dot labels are derived from tuning+fret at render time, so
+   *  they follow automatically. When `wrap` is true each dot's new fret
+   *  wraps WITHIN ITS OWN OCTAVE BAND (see above). */
   const transposeChordDoc = (src: ChordDoc, n: number, gdef: Settings, wrap = false): ChordDoc => {
     const c = structuredClone(src);
     const s = mergeChordSettings(gdef, c.settings);
-    // 1) Tuning patch: shifting every open string shifts ALL pitches equally —
-    //    including the derived open-note ring and letter-mode labels. Only
-    //    touch it when the chord actually carries its own tuning override.
-    //    (Wrap mode leaves the tuning untouched: dots move within their octave
-    //    bands, so open-string pitches must not shift.)
-    if (!wrap && c.settings && Array.isArray(c.settings.tuning)) {
-      c.settings.tuning = (c.settings.tuning as number[]).map(m => (typeof m === 'number' ? m + n : m));
-    }
-    // 2) Dot frets: absFret + n keeps each dot's actual pitch in sync with the
-    //    shifted tuning (relative slot stays identical ⇒ shape does not move).
+    // 1) Dot frets ONLY — the tuning array is deliberately left untouched.
+    //    Plain mode: fret + n raises each dot's actual pitch by n semitones
+    //    on the same string (shape moves up the neck; open strings of the
+    //    tuning are unaffected).
     //    WRAP mode: keep the dot inside its octave band — the pitch class
     //    still shifts by n, but high frets fold back down into the same octave
     //    (e.g. fret 11 +5 → 4, fret 17 +5 → 16) so transposed runs stay dense.
@@ -414,8 +412,8 @@ export default function App() {
       }
       if (d.text) { const r = shiftPitchLabel(d.text, n); if (r !== null) d.text = r; }
     }
-    // 3) Explicit root pitch class (-1 ⇒ auto/lowest note — stays correct via
-    //    the shifted tuning+frets) and explicit key string ("F", "Dm"…).
+    // 2) Explicit root pitch class (-1 ⇒ auto/lowest note — stays correct via
+    //    the shifted frets + unchanged tuning) and explicit key string ("F", "Dm"…).
     if (c.settings && typeof c.settings.noteRootPc === 'number' && c.settings.noteRootPc >= 0) {
       c.settings.noteRootPc = (c.settings.noteRootPc + n) % 12;
     }
@@ -426,10 +424,11 @@ export default function App() {
         c.settings.noteKey = nk + (k.minor ? 'm' : '');
       }
     }
-    // 4) Auto note labels: letter-mode labels are derived from tuning+fret at
-    //    render time (already shifted above). When labels were auto-filled in
-    //    a non-letter mode they live in dot.text — recompute them against the
-    //    NEW transposed board so they stay truthful.
+    // 3) Auto note labels: letter-mode labels are derived from tuning+fret at
+    //    render time (the frets shifted above, the tuning stays put ⇒ labels
+    //    follow automatically). When labels were auto-filled in a non-letter
+    //    mode they live in dot.text — recompute them against the NEW
+    //    transposed board so they stay truthful.
     const anyAuto = c.dots.some(d => !d.text && s.noteVisible && s.noteLabelMode !== 'letter');
     if (anyAuto) {
       const ctx: LabelCtx = {
@@ -2033,7 +2032,7 @@ export default function App() {
               : 'Apply-to-ALL is OFF: settings edits affect only the selected chord. Click to make every setting change apply to ALL chords.'}>
             {applyAllChords ? '🌐 All chords' : '🎯 Selected'}
           </button>
-          <span className="quick-ovr transpose-ctl" title={`Transpose pitches UP by 0–11 semitones.\n${applyAllChords ? '🌐 All chords is ON → applies to EVERY chord on every page and the saved library.' : '🎯 Selected is ON → applies only to the currently selected chord.'}\nModifies the pitch VALUES directly (per-chord tuning + dot frets + baked labels) — it is a one-shot edit, not a persistent setting. Single Undo (Ctrl+Z) reverts the whole transpose.`}>
+          <span className="quick-ovr transpose-ctl" title={`Transpose pitches UP by 0–11 semitones.\n${applyAllChords ? '🌐 All chords is ON → applies to EVERY chord on every page and the saved library.' : '🎯 Selected is ON → applies only to the currently selected chord.'}\nMoves the played pitches only — dot frets shift +n on the same strings; the guitar TUNING is never modified, so open-string pitch labels stay truthful. It also bakes custom pitch labels, root/key, one-shot edit (not a persistent setting). Single Undo (Ctrl+Z) reverts the whole transpose.`}>
             <label htmlFor="transpose-sel">⇧ Trsp</label>
             <select id="transpose-sel" className="txt transpose-select" defaultValue=""
               onChange={e => { const v = Number(e.target.value); e.target.value = ''; if (v > 0) onTranspose(v); }}>
