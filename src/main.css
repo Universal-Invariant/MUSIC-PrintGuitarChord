@@ -169,6 +169,14 @@ body { font-family: 'Segoe UI', Arial, sans-serif; background: #eceff3; color: #
 }
 .quick-ovr input[type="range"] { width: 90px; accent-color: #7a5af8; }
 
+/* Global transpose combo (toolbar) — one-shot pitch edit, not a setting */
+.transpose-ctl label { gap: 4px; }
+.transpose-select {
+  font-size: 12px; padding: 3px 6px; border-radius: 8px;
+  border: 1px solid #d7d2e0; background: #fff; color: #333; cursor: pointer;
+}
+.transpose-select:focus { outline: 2px solid #7a5af8; outline-offset: 1px; }
+
 /* ---------- multi-page workspace ---------- */
 .canvas-area.page-canvas { display: block; padding: 16px; }
 .print-root { display: flex; flex-direction: column; align-items: center; gap: 22px; min-width: fit-content; }

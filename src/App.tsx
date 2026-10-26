@@ -17,8 +17,8 @@ import {
   loadActivePageId, loadChordList, loadCustomShapes, loadPages, loadSettings, packRows,
   paginateRows, saveActivePageId, saveChordList, saveCustomShapes, savePages, saveSettings,
 } from './lib/storage';
-import { CHORD_LIBRARY, analyzeChord, chordMatchesQuery, enumerateOctavePositions, shapePitchClasses, shapeRootPc, suggestNoteNames } from './lib/music';
-import type { NoteLabelMode } from './lib/music';
+import { CHORD_LIBRARY, analyzeChord, chordMatchesQuery, computeDotLabel, enumerateOctavePositions, midiToName, parseKeyString, shapePitchClasses, shapeRootPc, suggestNoteNames } from './lib/music';
+import type { LabelCtx, NoteLabelMode } from './lib/music';
 import { HistoryManager } from './lib/history';
 import SettingsPanel from './components/SettingsPanel';
 import ItemDialog, { newFingering, newText } from './components/ItemDialog';
@@ -343,6 +343,106 @@ export default function App() {
    *  next pushHistory() call so page + library mutate as ONE undo step. */
   const libDirtyRef = useRef(false);
   const pushLibHistory = useCallback(() => { libDirtyRef.current = true; }, []);
+
+  // ---------- global TRANSPOSE (one-shot pitch edit, NOT a persistent setting) ----------
+  const NOTE_NAME_PC: Record<string, number> = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 };
+  const TR_SKIP_WORDS = new Set(['x', 'o', 'open', 'muted']);
+  /** Rewrite one pitch-bearing label by shifting its semitone value by n.
+   *  Handles plain names ('A#', 'Bb'), names with octave digits ('E2') and
+   *  accidental-only labels ('#', 'bb' ⇒ +1/-2). Returns null when the string
+   *  is not a pitch label (fingering numbers, R/m3/P5, degrees, 'x'…) so those
+   *  survive a transpose untouched. */
+  const shiftPitchLabel = (raw: string, n: number): string | null => {
+    const t = raw.trim();
+    if (!t || TR_SKIP_WORDS.has(t.toLowerCase())) return null;
+    // accidental-only label: '#' / '♯' / '+' per sharp, 'b' / '♭' per flat
+    if (/^[#+♯b♭s]+$/.test(t)) {
+      let d = 0;
+      for (const ch of t) d += (ch === '#' || ch === '♯' || ch === '+') ? 1 : -1;
+      const nd = (((d + n) % 12) + 12) % 12;
+      if (nd === 0) return '';                       // cancelled back to natural
+      return nd <= 6 ? '#'.repeat(nd) : 'b'.repeat(12 - nd);
+    }
+    const m = t.match(/^([A-Ga-g])((?:[#b♯♭][#b♯♭]*)?)(.*)$/);
+    if (!m) return null;
+    const base = NOTE_NAME_PC[m[1].toUpperCase()];
+    if (base == null) return null;
+    let pc = base;
+    for (const ch of m[2]) pc += (ch === '#' || ch === '♯') ? 1 : -1;
+    pc = ((pc + n) % 12 + 12) % 12;
+    const rest = m[3] ?? '';
+    const preferFlat = /[b♭]/.test(m[2]) || /^(b|#b)/.test(rest); // keep the chord's spelling bias
+    return midiToName(pc + 60, preferFlat) + rest;
+  };
+  /** Transpose EVERY sounding pitch of one chord up by n semitones — purely by
+   *  modifying values in place (per-chord tuning, dot frets, explicit root/key,
+   *  custom dot texts and auto note labels), never as a stored/render-time
+   *  "transpose" setting. Open-string pitch names and letter-mode dot labels
+   *  are DERIVED from `tuning` at draw time, so shifting the tuning array
+   *  shifts them automatically — nothing to bake there. */
+  const transposeChordDoc = (src: ChordDoc, n: number, gdef: Settings): ChordDoc => {
+    const c = structuredClone(src);
+    const s = mergeChordSettings(gdef, c.settings);
+    // 1) Tuning patch: shifting every open string shifts ALL pitches equally —
+    //    including the derived open-note ring and letter-mode labels. Only
+    //    touch it when the chord actually carries its own tuning override.
+    if (c.settings && Array.isArray(c.settings.tuning)) {
+      c.settings.tuning = (c.settings.tuning as number[]).map(m => (typeof m === 'number' ? m + n : m));
+    }
+    // 2) Dot frets: absFret + n keeps each dot's actual pitch in sync with the
+    //    shifted tuning (relative slot stays identical ⇒ shape does not move).
+    for (const d of c.dots) {
+      d.fret += n;
+      if (d.text) { const r = shiftPitchLabel(d.text, n); if (r !== null) d.text = r; }
+    }
+    // 3) Explicit root pitch class (-1 ⇒ auto/lowest note — stays correct via
+    //    the shifted tuning+frets) and explicit key string ("F", "Dm"…).
+    if (c.settings && typeof c.settings.noteRootPc === 'number' && c.settings.noteRootPc >= 0) {
+      c.settings.noteRootPc = (c.settings.noteRootPc + n) % 12;
+    }
+    if (c.settings && typeof c.settings.noteKey === 'string' && c.settings.noteKey.trim()) {
+      const k = parseKeyString(c.settings.noteKey);
+      if (k) {
+        const nk = midiToName(((k.rootPc + n) % 12 + 12) % 12, !!s.preferFlats);
+        c.settings.noteKey = nk + (k.minor ? 'm' : '');
+      }
+    }
+    // 4) Auto note labels: letter-mode labels are derived from tuning+fret at
+    //    render time (already shifted above). When labels were auto-filled in
+    //    a non-letter mode they live in dot.text — recompute them against the
+    //    NEW transposed board so they stay truthful.
+    const anyAuto = c.dots.some(d => !d.text && s.noteVisible && s.noteLabelMode !== 'letter');
+    if (anyAuto) {
+      const ctx: LabelCtx = {
+        mode: s.noteLabelMode,
+        soundingAbs: c.dots.map(d => ({ string: d.string, abs: d.fret })),
+        tuning: s.tuning, startFret: s.startFret, preferFlats: !!s.preferFlats,
+        rootPc: (s.noteRootPc ?? -1) >= 0 ? s.noteRootPc : shapeRootPc(c.dots, s.tuning),
+        key: s.noteKey || null,
+      };
+      for (const d of c.dots) if (!d.text) d.text = computeDotLabel(d.string, d.fret, ctx);
+    }
+    return c;
+  };
+  /** Toolbar handler: +0..+11 semitones. Scope follows the apply-to-all toggle:
+   *  ON ⇒ every chord on every page AND the saved library; OFF ⇒ only the
+   *  currently selected chord. Recorded as ONE undo step (pages + library). */
+  const onTranspose = (n: number) => {
+    if (!Number.isFinite(n) || n === 0) return;
+    const scopeAll = applyAllRef.current;
+    if (!scopeAll && !selectedId) { flash('Select a chord first, or switch to 🌐 All chords'); return; }
+    pushHistory();
+    pushLibHistory();
+    const gdef = settingsRef.current;
+    setPages(list => list.map(p => ({
+      ...p,
+      chords: p.chords.map(c => (scopeAll || c.id === selectedId) ? transposeChordDoc(c, n, gdef) : c),
+    })));
+    if (scopeAll) setChords(list => list.map(c => transposeChordDoc(c, n, gdef)));
+    flash(scopeAll
+      ? `Transposed ALL chords up ${n} semitone${n === 1 ? '' : 's'} (${n} → +${n})`
+      : `Transposed "${entry?.name ?? 'chord'}" up ${n} semitone${n === 1 ? '' : 's'}`);
+  };
 
   /** Page-level ops that MUST create a new page object: React bails out of a
    *  state update when the updater returns the SAME reference it was given, so
@@ -884,7 +984,6 @@ export default function App() {
     // doesn't jump by the delta between old and new renders.
     pendingReanchorRef.current = true;
     draggingRef.current = true;              // suppress click follow-ups NOW
-    setDragging(true);
     setSel(s);
     itemDragPressRef.current = client ? { x: client.x, y: client.y, moved: false } : null;
     return true;
@@ -986,7 +1085,6 @@ export default function App() {
       setEditing({ kind: 'text', id: ref.itemId });   // click (not drag): edit it
     }
     histPausedRef.current = false;         // re-arm history after the gesture
-    setDragging(false);                    // state only drives cursor/UI now
     dragRef.current = null;
     return true;
   };
@@ -1001,7 +1099,6 @@ export default function App() {
     pendingReanchorRef.current = false;
     dragRef.current = null;
     histPausedRef.current = false;
-    setDragging(false);
   };
 
   const onBoardPointerDown = (e: React.MouseEvent) => {
@@ -1839,6 +1936,16 @@ export default function App() {
               : 'Apply-to-ALL is OFF: settings edits affect only the selected chord. Click to make every setting change apply to ALL chords.'}>
             {applyAllChords ? '🌐 All chords' : '🎯 Selected'}
           </button>
+          <span className="quick-ovr transpose-ctl" title={`Transpose pitches UP by 0–11 semitones.\n${applyAllChords ? '🌐 All chords is ON → applies to EVERY chord on every page and the saved library.' : '🎯 Selected is ON → applies only to the currently selected chord.'}\nModifies the pitch VALUES directly (per-chord tuning + dot frets + baked labels) — it is a one-shot edit, not a persistent setting. Single Undo (Ctrl+Z) reverts the whole transpose.`}>
+            <label htmlFor="transpose-sel">⇧ Trsp</label>
+            <select id="transpose-sel" className="txt transpose-select" defaultValue=""
+              onChange={e => { const v = Number(e.target.value); e.target.value = ''; if (v > 0) onTranspose(v); }}>
+              <option value="" disabled>{applyAllChords ? 'all chords…' : 'selected…'}</option>
+              {Array.from({ length: 12 }, (_, i) => (
+                <option key={i} value={i}>{i === 0 ? '+0 (same)' : `+${i} semitone${i === 1 ? '' : 's'}`}</option>
+              ))}
+            </select>
+          </span>
         </div>
         <div className="toolbar right">
           <button className="btn" onClick={undo} disabled={!canUndo} title={`Undo (Ctrl+Z) — ${hist.undoCount()} step(s)`}>↩ Undo</button>
