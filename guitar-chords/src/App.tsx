@@ -461,15 +461,34 @@ export default function App() {
     const cycleShape = cycleShapeIndices(es);
     mutateOn(cid, d => {
       if (e.shiftKey && existing) {
-        const dot = d.dots.find(dd => dd.id === existing.id)!;
-        const pos = cycleColor.indexOf(dot.colorIdx);
-        dot.colorIdx = cycleColor[(pos + 1) % cycleColor.length] ?? 0;
+        // OCTAVE MODE: cycle the colour of every octave twin too, so one
+        // shift-click restyles all copies of the pitch class at once.
+        const pcOf = (dot: Dot) => {
+          const m = (es.tuning[dot.string] ?? 64) + Math.max(0, dot.fret);
+          return ((m % 12) + 12) % 12;
+        };
+        const targetPc = pcOf(existing);
+        for (const dd of d.dots) {
+          if (!es.octaveMode || dd.id === existing.id || pcOf(dd) === targetPc) {
+            const pos = cycleColor.indexOf(dd.colorIdx);
+            dd.colorIdx = cycleColor[(pos + 1) % cycleColor.length] ?? 0;
+          }
+        }
         return d;
       }
       if ((e.ctrlKey || e.metaKey) && existing) {
-        const dot = d.dots.find(dd => dd.id === existing.id)!;
-        const pos = cycleShape.indexOf(dot.shapeIdx);
-        dot.shapeIdx = cycleShape[(pos + 1) % cycleShape.length] ?? 0;
+        // Same idea for shapes: ctrl-click cycles every octave twin's shape.
+        const pcOf = (dot: Dot) => {
+          const m = (es.tuning[dot.string] ?? 64) + Math.max(0, dot.fret);
+          return ((m % 12) + 12) % 12;
+        };
+        const targetPc = pcOf(existing);
+        for (const dd of d.dots) {
+          if (!es.octaveMode || dd.id === existing.id || pcOf(dd) === targetPc) {
+            const pos = cycleShape.indexOf(dd.shapeIdx);
+            dd.shapeIdx = cycleShape[(pos + 1) % cycleShape.length] ?? 0;
+          }
+        }
         return d;
       }
       if (existing) return { ...d, dots: d.dots.filter(dd => dd.id !== existing.id) };
