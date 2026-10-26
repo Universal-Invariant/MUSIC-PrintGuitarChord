@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ChordColor } from '../lib/types';
-
 // ---------- color utils ----------
 export function hexToRgb(hex: string): [number, number, number] {
   const h = hex.replace('#', '');
@@ -31,7 +30,7 @@ function rgbToHsv(r: number, g: number, b: number): [number, number, number] {
   return [h, max === 0 ? 0 : d / max, max];
 }
 
-const SIZE = 170, SV_H = 120;
+const SIZE = 150, SV_H = 104;
 
 interface Props {
   value: ChordColor;
@@ -44,15 +43,43 @@ interface Props {
 export default function ColorPicker({ value, onChange, label, compact }: Props) {
   const wheelRef = useRef<HTMLCanvasElement>(null);
   const svRef = useRef<HTMLCanvasElement>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
   const [open, setOpen] = useState(!compact);
   const [hex, setHex] = useState(value.hex);
 
   const init = rgbToHsv(...hexToRgb(value.hex));
   const hue = useRef(init[0]); const sat = useRef(init[1]); const val = useRef(init[2]);
-  useEffect(() => { const t = rgbToHsv(...hexToRgb(value.hex)); hue.current = t[0]; sat.current = t[1]; val.current = t[2]; drawWheel(); drawSV(); /* eslint-disable-next-line */ }, [value.hex]);
 
-  // draw static wheel ring
-  useEffect(() => { drawWheel(); /* eslint-disable-next-line */ }, []);
+  // Keep the HSV refs and hex box in sync with the incoming color so opening
+  // the panel always shows the CURRENT color (previously they were initialized
+  // once at mount and never re-synced after external changes such as typing a
+  // hex value or picking from the color basket). Draw only when the panel is
+  // open — the canvases don't exist otherwise.
+  useEffect(() => {
+    const t = rgbToHsv(...hexToRgb(value.hex));
+    hue.current = t[0]; sat.current = t[1]; val.current = t[2];
+    setHex(value.hex);
+    if (open) { drawWheel(); drawSV(); }
+    // eslint-disable-next-line
+  }, [value.hex, open]);
+
+  // The picker often sits inside a scrollable dialog; render the panel in
+  // fixed viewport coordinates (measured from the swatch) and flip it above /
+  // clamp it sideways when there isn't room below, so opening it can never
+  // expand the dialog or push its own controls off-screen.
+  const [panelPos, setPanelPos] = useState<{ top: number; left: number } | null>(null);
+  useEffect(() => {
+    if (!open) { setPanelPos(null); return; }
+    const el = rootRef.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    const pw = SIZE + 34, ph = SIZE + SV_H + 110;
+    let top = r.bottom + 6;
+    if (top + ph > window.innerHeight - 8 && r.top - 6 - ph > 8) top = r.top - 6 - ph;
+    let left = Math.min(Math.max(8, r.left), Math.max(8, window.innerWidth - pw - 8));
+    setPanelPos({ top, left });
+    // eslint-disable-next-line
+  }, [open]);
 
   function drawWheel() {
     const c = wheelRef.current; if (!c) return;
@@ -138,7 +165,7 @@ export default function ColorPicker({ value, onChange, label, compact }: Props) 
   };
 
   return (
-    <div className="colorpicker">
+    <div className="colorpicker" ref={rootRef}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
         {label && <span className="cp-label">{label}</span>}
         <div style={swatchStyle} onClick={() => setOpen(o => !o)} title="Pick color">
@@ -157,7 +184,7 @@ export default function ColorPicker({ value, onChange, label, compact }: Props) 
         <span className="mini">{Math.round(value.alpha * 100)}%</span>
       </div>
       {open && (
-        <div className="cp-panel">
+        <div className="cp-panel" style={{ position: 'fixed', top: panelPos?.top ?? -9999, left: panelPos?.left ?? -9999 }}>
           <canvas ref={wheelRef} width={SIZE} height={SIZE}
             onPointerDown={e => { (e.target as HTMLElement).setPointerCapture(e.pointerId); wheelPointer(e); }}
             onPointerMove={e => { if (e.buttons) wheelPointer(e); }} />
