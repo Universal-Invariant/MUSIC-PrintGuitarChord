@@ -127,7 +127,7 @@ export type NoteLabelMode = 'letter' | 'interval' | 'tonal' | 'degree';
 /** Canonical short names for the 12 intervals above a root. */
 export const INTERVAL_NAMES = ['R', 'm2', 'M2', 'm3', 'M3', 'P4', 'TT', 'P5', 'm6', 'M6', 'm7', 'M7'];
 
-const LETTER_PC: Record<string, number> = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 };
+export const LETTER_PC: Record<string, number> = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 };
 
 export interface ScaleInfo {
   pcs: number[];      // 7 pitch classes
