@@ -4,7 +4,7 @@ import {
   CHORD_SETTING_KEYS, GLOBAL_ONLY_SETTING_KEYS, MIN_NUM_FRETS, applyGlobalBoardScale,
   bakeInheritedItemsToAllChords, chordPatchFrom, clampNumFrets, clampStartFret, fitsPage,
   sanitizeGlobalValue,
-  mergeChordSettings, pageSizePx, placementsOverlap, resolveCollision, snapVal, stripGlobalKeysFromChordDocs,
+  mergeChordSettings, orderByZ, pageSizePx, placementsOverlap, resolveCollision, snapVal, stripGlobalKeysFromChordDocs,
   syncKeysToAllChords, uid,
 } from './lib/types';
 import { composePage, cycleColorIndices, cycleShapeIndices, makeDot, renderSvg, svgInner } from './lib/render';
@@ -747,7 +747,12 @@ export default function App() {
   const renderedPages = useMemo(() => {
     return pages.map(p => {
       const ps = pageSizePx(p.config);
-      const chords = p.chords.map(c => {
+      // Paint order = z-order: chords are emitted in ASCENDING zOrder so an
+      // overlapping chord with a higher level draws ON TOP (SVG paints in
+      // document order). Text boxes live inside each chord's own <g>, so they
+      // always render above their own chord's board but can never escape it —
+      // a chord stacked above still covers them (the requested layering rule).
+      const chords = orderByZ(p.chords).map(c => {
         const es = applyGlobalBoardScale(mergeChordSettings(settings, c.settings), settings);
         const markup = renderSvg(c, es, { customs });
         const nat = intrinsic(markup);
@@ -1915,6 +1920,37 @@ export default function App() {
     setPage(p => { p.config = { ...p.config, ...patch }; return p; });
   };
 
+  /** Page z-order control for the SELECTED chord ("Page setup" panel).
+   *  Chords are painted in ascending zOrder, so higher ⇒ drawn on top of
+   *  overlapping chords. Text boxes always stay inside their own chord's
+   *  layer — they render above their own board but never above a chord with
+   *  a higher level. `mode`:
+   *  - 'up' / 'down' : nudge this chord one level (+1 / −1) relative to others
+   *  - 'front'       : bring above every other chord on the page
+   *  - 'back'        : send below every other chord on the page
+   *  - 'reset'       : drop back to the default level 0 */
+  const setChordZ = (mode: 'up' | 'down' | 'front' | 'back' | 'reset') => {
+    if (!page || !selectedId) return;
+    pushHistory();
+    setPage(p => {
+      const i = p.chords.findIndex(c => c.id === selectedId);
+      if (i < 0) return p;
+      const zs = p.chords.map(c => c.zOrder ?? 0);
+      const cur = zs[i];
+      let z = cur;
+      if (mode === 'up') z = cur + 1;
+      else if (mode === 'down') z = cur - 1;
+      else if (mode === 'front') z = Math.max(...zs) + 1;
+      else if (mode === 'back') z = Math.min(...zs) - 1;
+      else if (mode === 'reset') z = 0;
+      if (z === cur) return p;                       // nothing changes — skip the write
+      const next = [...p.chords];
+      next[i] = { ...next[i], zOrder: z };
+      return { ...p, chords: next };
+    });
+    flash(mode === 'reset' ? 'Z-order reset to 0' : `Z-order: ${mode}`);
+  };
+
   /** Re-measure every chord box and pull back-inside ones that no longer fit.
    *  Also normalizes legacy records whose w/h were stored pre-multiplied by the
    *  scale (double-scaling made boxes unmovable / mis-clamped). */
@@ -2055,7 +2091,9 @@ export default function App() {
   const composeCurrent = (sc: number): string => {
     if (!page) return '';
     const ps = pageSizePx(page.config);
-    return composePage(ps, page.chords.map(c => {
+    // same z-order paint sequence as the on-screen page (orderByZ), so exports
+    // and prints show overlapping chords stacked exactly like the editor
+    return composePage(ps, orderByZ(page.chords).map(c => {
       const es = applyGlobalBoardScale(mergeChordSettings(settings, c.settings), settings);
       const markup = renderSvg(c, es, { customs });
       const pl = page.placements[c.id] ?? { x: 40, y: 40, w: 0, h: 0, scale: 1 };

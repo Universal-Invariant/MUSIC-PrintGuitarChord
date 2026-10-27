@@ -175,7 +175,14 @@ export function renderSvg(doc: ChordDoc, settings: Settings, opts: RenderOpts & 
   // font / size / rotation are resolved AT DRAW TIME: an item without an
   // explicit value follows the GLOBAL text defaults, so changing those
   // settings updates every such box on EVERY chord — not just the selected one.
-  for (const t of doc.texts) {
+  // Stacking INSIDE the chord: painted in ascending zIndex (stable — equal
+  // levels keep creation order), and ALWAYS BELOW the note dots above (dots
+  // were pushed before this section), so a text box can never cover a dot of
+  // its own chord; it only layers against other text boxes of the same chord.
+  const textsOrdered = doc.texts.some(t => (t.zIndex ?? 0) !== 0)
+    ? doc.texts.map((t, i) => ({ t, i })).sort((a, b) => (a.t.zIndex ?? 0) - (b.t.zIndex ?? 0) || a.i - b.i).map(x => x.t)
+    : doc.texts;
+  for (const t of textsOrdered) {
     const x = t.x * w, y = t.y * h;
     const rot = t.rotation ?? s.defaultTextRotation ?? 0;
     const size = t.size ?? s.defaultTextSize ?? 14;
