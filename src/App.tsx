@@ -140,6 +140,12 @@ export default function App() {
   };
 
   const selectedId = page?.selected ?? null;
+  // Live mirror of `selectedId` for pointer handlers: an inline page click
+  // selects the clicked chord and starts a drag in the SAME event, so the
+  // closure's `selectedId` still describes the OLD selection. Drag code must
+  // never trust it mid-gesture — see onBoardPointerMove / onChordBoxMove.
+  const selectedIdRef = useRef<string | null>(selectedId);
+  useEffect(() => { selectedIdRef.current = selectedId; }, [selectedId]);
   const selIdx = page?.chords.findIndex(c => c.id === selectedId) ?? -1;
   const entry: ChordDoc | null = selIdx >= 0 ? page.chords[selIdx] : null;
 
@@ -766,17 +772,43 @@ export default function App() {
   const pageView = renderedPages[pageIdx] ?? null;
 
   // ---------- coordinate helpers ----------
-  const toBoardCoords = (e: { clientX: number; clientY: number }): { x: number; y: number } | null => {
-    // Returns null when the board SVG can't be measured. Callers MUST bail on
-    // null: previously this fell back to {x:0,y:0}, so a drag whose pointer
-    // left the board mid-gesture received "local" (0,0) and teleported the
-    // grabbed item to the board's top-left corner (looked off-screen).
-    const el = boardWrapRef.current?.querySelector('svg');
-    if (!el) return null;
-    const rect = el.getBoundingClientRect();
+  /** Client px -> canvas-local coords inside the EXTERNAL chord-editor board.
+   *  The editor renders `boardMarkup` via dangerouslySetInnerHTML, so the SVG
+   *  element is NOT part of React's virtual tree — we must locate it through
+   *  the DOM (`querySelector`) instead of a ref callback, which never fires
+   *  for injected nodes. When an id is given and that chord is NOT the one
+   *  shown in the editor, fall back to the page-placement mapping. */
+  const toEditorBoardCoords = (clientX: number, clientY: number, id?: string): { x: number; y: number } | null => {
+    const wrap = boardWrapRef.current;
+    if (!wrap) return null;
+    const svgEl = wrap.querySelector('svg');
+    if (!svgEl) return null;
+    // If the gesture belongs to a DIFFERENT chord than the one the external
+    // editor currently shows, don't mix coordinate systems — map through the
+    // live page placement of THAT chord instead.
+    if (id && selectedId && id !== selectedId) {
+      return toChordLocalById(id, clientX, clientY);
+    }
+    // Prefer the exact screen CTM when available (handles preserveAspectRatio
+    // letterboxing); fall back to the bounding-rect ratio otherwise.
+    const ctm = typeof svgEl.getScreenCTM === 'function' ? svgEl.getScreenCTM() : null;
+    if (ctm) {
+      const p = new DOMPoint(clientX, clientY).matrixTransform(ctm.inverse());
+      if (Number.isFinite(p.x) && Number.isFinite(p.y)) return { x: p.x, y: p.y };
+    }
+    const rect = svgEl.getBoundingClientRect();
     if (!(rect.width > 0)) return null;
-    const scale = rect.width / size.w;
-    return { x: (e.clientX - rect.left) / scale, y: (e.clientY - rect.top) / scale };
+    // Native canvas width of the chord CURRENTLY rendered in the editor. Read
+    // from the live committed page rather than the render closure's `size`,
+    // which can lag one frame behind selection changes.
+    const pg = pages[pageIdxRef.current] ?? page;
+    const doc = pg?.chords.find(c => c.id === (id ?? selectedId));
+    const w = doc
+      ? canvasSize(applyGlobalBoardScale(mergeChordSettings(settings, doc.settings), settings)).w
+      : size.w;
+    if (!(w > 0)) return null;
+    const scale = rect.width / w;
+    return { x: (clientX - rect.left) / scale, y: (clientY - rect.top) / scale };
   };
   // ---------- per-element coordinate mapping (SVG screen CTMs) ----------
   // Each chord box registers its <g> element and each page its <svg>. All
@@ -1080,7 +1112,7 @@ export default function App() {
   const onBoardClick = (e: React.MouseEvent) => {
     if (!entry || draggingRef.current || pageDrag) return;
     e.stopPropagation();
-    const local = toBoardCoords(e);
+    const local = toEditorBoardCoords(e.clientX, e.clientY);
     if (!local) return;                       // board not measurable — never act on (0,0)
     // Some browsers suppress dblclick when the second click's default is prevented
     // anywhere in its path — implement double-click manually (400 ms / 8 px window).
@@ -1120,7 +1152,7 @@ export default function App() {
     if (!entry || draggingRef.current) return;
     e.preventDefault();
     e.stopPropagation();
-    const local = toBoardCoords(e);
+    const local = toEditorBoardCoords(e.clientX, e.clientY);
     if (!local) return;
     openEditLocal(local);
   };
@@ -1322,7 +1354,7 @@ export default function App() {
     // contextmenu/text-selection quirks around ctrl+click and the plain
     // "click" path never reliably sees the modifier.
     if ((e.ctrlKey || e.metaKey) && selectedId) {
-      const local = toBoardCoords(e);
+      const local = toEditorBoardCoords(e.clientX, e.clientY);
       if (local) {
         const s = pickItemAt(selectedId, local.x, local.y);
         if (s) { e.preventDefault(); e.stopPropagation(); lastClickRef.current = null; deleteItemAt(selectedId, s); return; }
@@ -1335,17 +1367,17 @@ export default function App() {
     // SHIFT is always honoured too — shift+press grabs ANY dot/text for a
     // move regardless of the active tool ("move mode" gesture).
     if (tool !== 'select' && !e.shiftKey) return;
-    beginTextDrag(selectedId!, toBoardCoords(e), { x: e.clientX, y: e.clientY });
+    beginTextDrag(selectedId!, toEditorBoardCoords(e.clientX, e.clientY), { x: e.clientX, y: e.clientY });
   };
   const onBoardPointerMove = (e: React.MouseEvent) => {
     if (!draggingRef.current || !dragRef.current) return;
-    // PIN to the chord the gesture started on — when that chord is the
-    // selected one, measure against its board; otherwise (or after a
-    // selection change mid-gesture) map through the live page placement so
-    // coordinates never mix with another chord's canvas.
-    const local = dragRef.current.id === selectedId
-      ? toBoardCoords(e)
-      : toChordLocalById(dragRef.current.id, e.clientX, e.clientY);
+    // PIN to the chord the gesture started on, and recognise WHERE the pointer
+    // physically is: this handler only receives events over the EXTERNAL
+    // editor board, so measure against that SVG — never re-resolve through
+    // page placements with a possibly-stale `selectedId` closure value (the
+    // old check compared against a stale selection and mapped editor drags
+    // through the wrong coordinate system).
+    const local = toEditorBoardCoords(e.clientX, e.clientY, dragRef.current.id);
     if (!local) return;
     applyItemDrag(local, { x: e.clientX, y: e.clientY });
   };
@@ -1607,7 +1639,20 @@ export default function App() {
       // from the pointer's screen position mid-drag made the text jump into a
       // neighbouring/overlapping chord's coordinate space (wrong y — "the
       // chord below") and could re-anchor grab offsets every frame.
-      const local = toChordLocalById(dragRef.current.id, e.clientX, e.clientY);
+      // RECOGNISE WHERE THE POINTER IS: a page-canvas mousemove whose point
+      // lands inside the EXTERNAL editor board must be measured in the
+      // editor's own coordinate system (its SVG rect), NOT via the page
+      // placement of the chord — the editor renders that chord at a totally
+      // different screen position. Using the wrong system offset the drag by
+      // roughly one viewport and pinned the text along a bogus y line.
+      let local: { x: number; y: number } | null = null;
+      const wrapRect = boardWrapRef.current?.getBoundingClientRect();
+      if (wrapRect && wrapRect.width > 0
+        && e.clientX >= wrapRect.left && e.clientX <= wrapRect.right
+        && e.clientY >= wrapRect.top && e.clientY <= wrapRect.bottom) {
+        local = toEditorBoardCoords(e.clientX, e.clientY, dragRef.current.id);
+      }
+      if (!local) local = toChordLocalById(dragRef.current.id, e.clientX, e.clientY);
       if (local) applyItemDrag(local, { x: e.clientX, y: e.clientY });
       return;
     }
