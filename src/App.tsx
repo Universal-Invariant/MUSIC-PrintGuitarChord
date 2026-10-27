@@ -1109,7 +1109,9 @@ export default function App() {
     if (!entry || draggingRef.current) return;
     e.preventDefault();
     e.stopPropagation();
-    openEditLocal(toBoardCoords(e));
+    const local = toBoardCoords(e);
+    if (!local) return;
+    openEditLocal(local);
   };
 
   // ---------- text-box dragging inside a chord (external editor AND inline) ----------
@@ -1323,7 +1325,9 @@ export default function App() {
   };
   const onBoardPointerMove = (e: React.MouseEvent) => {
     if (!draggingRef.current || !dragRef.current) return;
-    applyItemDrag(toBoardCoords(e), { x: e.clientX, y: e.clientY });
+    const local = toBoardCoords(e);
+    if (!local) return;
+    applyItemDrag(local, { x: e.clientX, y: e.clientY });
   };
   const onBoardPointerUp = () => {
     endItemDrag();
@@ -1704,6 +1708,21 @@ export default function App() {
     }
     pageDragRef.current = null;
   };
+
+  // Safety net: if the mouse is released OUTSIDE the canvas/board (e.g. over a
+  // panel or off-window), the element-level mouseup never fires and the drag
+  // gesture would stay armed — subsequent clicks get swallowed ("stuck" items)
+  // or a stale drag ref teleports the next grabbed item. End/cancel on ANY
+  // window-level mouseup.
+  useEffect(() => {
+    const up = () => {
+      endItemDrag();
+      cancelItemDrag();
+    };
+    window.addEventListener('mouseup', up);
+    return () => window.removeEventListener('mouseup', up);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // ---------- dialog apply ----------
   const applyEdit = (kind: 'dot' | 'text' | 'fing', item: any) => {
