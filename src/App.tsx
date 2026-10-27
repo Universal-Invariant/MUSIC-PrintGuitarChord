@@ -824,11 +824,17 @@ export default function App() {
   };
 
   /** Client px -> local coords inside chord `id`'s canvas space, derived from
-   *  the shared page matrix + THAT chord's placement (x, y, scale). */
+   *  the shared page matrix + THAT chord's placement (x, y, scale). Reads the
+   *  LIVE committed page (`pages[pageIdxRef.current]`) rather than the render
+   *  closure's `page`: during fast drags React batches several mousemove
+   *  events into one render pass, and a stale `page` snapshot would resolve
+   *  placements against old numbers — the pointer then maps into the WRONG
+   *  chord's space (the classic "text jumps to the chord below" bug). */
   const toChordLocalById = (id: string, clientX: number, clientY: number): { x: number; y: number } | null => {
-    if (!page) return null;
-    const pl = page.placements[id];
-    if (!pl) return null;
+    const pg = pages[pageIdxRef.current] ?? page;
+    if (!pg) return null;
+    const pl = pg.placements[id];
+    if (!pl || !(pl.scale > 0)) return null;
     const pt = toPageCoords({ clientX, clientY });
     if (!Number.isFinite(pt.x)) return null;
     return { x: (pt.x - pl.x) / pl.scale, y: (pt.y - pl.y) / pl.scale };
@@ -1125,11 +1131,14 @@ export default function App() {
    *  last render still describe the OLD chord. Read the clicked chord's doc and
    *  its own canvas size directly from the page instead. */
   const textDragCtx = (id: string): { doc: ChordDoc; w: number; h: number } | null => {
-    if (!page) return null;
-    const doc = id === selectedId && entry ? entry : page.chords.find(c => c.id === id) ?? null;
+    const pg = pages[pageIdxRef.current] ?? page;
+    if (!pg) return null;
+    // ALWAYS resolve the doc from the page by the dragged chord's OWN id —
+    // never via the possibly-stale `entry` of the previously selected chord.
+    const doc = pg.chords.find(c => c.id === id) ?? null;
     if (!doc) return null;
     const es = applyGlobalBoardScale(mergeChordSettings(settings, doc.settings), settings);
-    const sz = id === selectedId ? size : canvasSize(es);
+    const sz = canvasSize(es);
     return { doc, w: sz.w, h: sz.h };
   };
 
@@ -1330,7 +1339,13 @@ export default function App() {
   };
   const onBoardPointerMove = (e: React.MouseEvent) => {
     if (!draggingRef.current || !dragRef.current) return;
-    const local = toBoardCoords(e);
+    // PIN to the chord the gesture started on — when that chord is the
+    // selected one, measure against its board; otherwise (or after a
+    // selection change mid-gesture) map through the live page placement so
+    // coordinates never mix with another chord's canvas.
+    const local = dragRef.current.id === selectedId
+      ? toBoardCoords(e)
+      : toChordLocalById(dragRef.current.id, e.clientX, e.clientY);
     if (!local) return;
     applyItemDrag(local, { x: e.clientX, y: e.clientY });
   };
@@ -1588,8 +1603,11 @@ export default function App() {
   const onChordBoxMove = (e: React.MouseEvent) => {
     // inline-edit: dragging a DOT or TEXT BOX inside a chord moves the item, not the box
     if (draggingRef.current && dragRef.current) {
-      const cid = chordAtClient(e.clientX, e.clientY) ?? dragRef.current.id;
-      const local = toChordLocalById(cid, e.clientX, e.clientY);
+      // PIN the gesture to the chord it STARTED on. Re-resolving the chord
+      // from the pointer's screen position mid-drag made the text jump into a
+      // neighbouring/overlapping chord's coordinate space (wrong y — "the
+      // chord below") and could re-anchor grab offsets every frame.
+      const local = toChordLocalById(dragRef.current.id, e.clientX, e.clientY);
       if (local) applyItemDrag(local, { x: e.clientX, y: e.clientY });
       return;
     }
@@ -2349,6 +2367,16 @@ export default function App() {
                 <button className="btn small" onClick={() => scaleAll(1.1)} title="Scale ALL chords up 10% (absolute mode: reset to 100% first, then set 110%)">＋ Scale</button>
                 <button className="btn small" onClick={() => scaleToDefault()} title="Reset ALL chord scales back to 100%">⟲ Reset scale</button>
               </div>
+              {/* Page z-order for the SELECTED chord — chords paint in ascending
+                  zOrder, so higher ⇒ drawn ON TOP of overlapping chords. */}
+              <div className="mini-note" style={{ marginTop: 6 }}>Z-order (selected chord): {selectedId ? `level ${entry?.zOrder ?? 0}` : 'select a chord'}</div>
+              <div className="page-ops">
+                <button className="btn small" onClick={() => setChordZ('up')} disabled={!hasSel} title="Bring the selected chord one level forward (drawn over lower chords)">⤒ Up</button>
+                <button className="btn small" onClick={() => setChordZ('down')} disabled={!hasSel} title="Send the selected chord one level back (lower chords draw over it)">⤓ Down</button>
+                <button className="btn small" onClick={() => setChordZ('front')} disabled={!hasSel} title="Bring to front — above every other chord on the page">⏫ Front</button>
+                <button className="btn small" onClick={() => setChordZ('back')} disabled={!hasSel} title="Send to back — below every other chord on the page">⏬ Back</button>
+                <button className="btn small" onClick={() => setChordZ('reset')} disabled={!hasSel || (entry?.zOrder ?? 0) === 0} title="Reset the selected chord's z-level to the default (0)">⟲ Reset</button>
+              </div>
             </details>
           </div>
 
@@ -2359,6 +2387,7 @@ export default function App() {
               {page.chords.map((c, i) => (
                 <div key={c.id} className={`chord-item ${c.id === selectedId ? 'cur' : ''}`}>
                   <button className="load" onClick={() => selectChord(c.id)} title="Select this chord">{i + 1}. {c.name}</button>
+                  {(c.zOrder ?? 0) !== 0 && <span className="cnt" title={`Page z-order level ${c.zOrder ?? 0} — higher paints on top`}>z{c.zOrder}</span>}
                   <span className="cnt">{c.dots.length}</span>
                   <button className="del" title="Remove from page (keeps it in My chords when saved)"
                     onClick={() => { pushHistory(); setPage(p => { p.chords = p.chords.filter(x => x.id !== c.id); delete p.placements[c.id]; if (p.selected === c.id) p.selected = p.chords[0]?.id ?? null; return p; }); }}>×</button>

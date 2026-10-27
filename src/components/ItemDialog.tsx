@@ -104,6 +104,14 @@ export default function ItemDialog({ kind, item, settings, customs, onApply, onD
                 <option value="">(global default)</option>
                 {[0, 90, 180, 270].map(r => <option key={r} value={r}>{r}°</option>)}
               </select></label>
+          </div>
+          <div className="two-col">
+            <label className="row"><span>Stack level <em style={{ fontWeight: 400, fontSize: 10 }}>(z)</em></span>
+              {/* Stacking WITHIN this chord only — higher paints on top of the
+                  chord's other text boxes. Never changes the chord's page
+                  z-order and is NOT touched by dragging. */}
+              <input type="number" min={-99} max={99} step={1} value={draft.zIndex ?? 0}
+                onChange={e => patch({ zIndex: Number(e.target.value) === 0 ? undefined : Number(e.target.value) })} /></label>
             <label className="row"><span>Align</span>
               <select value={draft.anchor ?? 'middle'} onChange={e => patch({ anchor: e.target.value })}>
                 <option value="start">Left</option><option value="middle">Center</option><option value="end">Right</option>
