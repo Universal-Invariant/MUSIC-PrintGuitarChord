@@ -22,6 +22,10 @@ import type { LabelCtx, NoteLabelMode } from './lib/music';
 import { HistoryManager } from './lib/history';
 import SettingsPanel from './components/SettingsPanel';
 import ItemDialog, { newFingering, newText } from './components/ItemDialog';
+import ThemePanel from './components/ThemePanel';
+import ThemeDialog from './components/ThemeDialog';
+import type { NoteTheme } from './lib/themes';
+import { applyThemeToChord, loadThemes, saveThemes, shiftThemeTexts } from './lib/themes';
 
 type Tool = 'dot' | 'text' | 'fing' | 'select';
 type Sel = { kind: 'dot' | 'text' | 'fing'; id: string } | null;
@@ -91,6 +95,19 @@ export default function App() {
     return s;
   });                                                       // global defaults (sanitized)
   const [customs, setCustoms] = useState<Record<string, string>>(() => loadCustomShapes());
+  // ---------- note THEMES (color/shape/text per chromatic slot) ----------
+  const [themes, setThemes] = useState<NoteTheme[]>(() => loadThemes());
+  const [showThemes, setShowThemes] = useState(false);
+  /** theme being edited in the dialog (a working COPY), or null */
+  const [themeEdit, setThemeEdit] = useState<NoteTheme | null>(null);
+  useEffect(() => { saveThemes(themes); }, [themes]);
+  /** true ⇒ at least one relative theme carries literal text templates that a
+   *  transpose must re-spell (memoized into a ref so onTranspose stays cheap). */
+  const themesRef = useRef(themes); useEffect(() => { themesRef.current = themes; }, [themes]);
+  const themeHasLiteralTextRef = useRef(false);
+  useEffect(() => {
+    themeHasLiteralTextRef.current = themes.some(t => t.mode === 'relative' && t.slots.some(s => s.text.trim() !== ''));
+  }, [themes]);
   const [chords, setChords] = useState<ChordDoc[]>(() => loadChordList());           // saved library
   const [pages, setPages] = useState<PageDoc[]>(() => {
     const ps = loadPages();
@@ -498,7 +515,58 @@ export default function App() {
       chords: p.chords.map(c => (scopeAll || c.id === selectedId) ? transposeChordDoc(c, n, gdef, wrap) : c),
     })));
     if (scopeAll) setChords(list => list.map(c => transposeChordDoc(c, n, gdef, wrap)));
+    // Relative-mode themes carry LITERAL letter/degree text templates that must
+    // follow the transposition too (a themed "C" becomes "D" after +2). The
+    // slots themselves never move — relative means "look follows the function".
+    if (themeHasLiteralTextRef.current) {
+      setThemes(list => list.map(th => shiftThemeTexts(th, n)));
+    }
     flash(`${wrap ? '⟲ Wrapped ' : 'Transposed '}${scopeAll ? 'ALL chords' : `"${entry?.name ?? 'chord'}"`} up ${n} semitone${n === 1 ? '' : 's'} (${n} → +${n})${wrap ? ' — octave-wrapped' : ''}`);
+  };
+
+  // ---------- theme actions ----------
+  /** Apply a theme to the selected chord — or, with 🌐 All chords ON, to every
+   *  chord on every page AND the saved library. One undo step. Dots keep their
+   *  position/stacking; only colorIdx / shapeIdx (+ literal slot text) change. */
+  const onApplyTheme = (th: NoteTheme) => {
+    const scopeAll = applyAllRef.current;
+    if (!scopeAll && !selectedId) { flash('Select a chord first, or switch to 🌐 All chords'); return; }
+    pushHistory();
+    if (scopeAll) pushLibHistory();
+    const gdef = settingsRef.current;
+    setPages(list => list.map(p => ({
+      ...p,
+      chords: p.chords.map(c => {
+        if (!scopeAll && c.id !== selectedId) return c;
+        const es = applyGlobalBoardScale(mergeChordSettings(gdef, c.settings), gdef);
+        return applyThemeToChord(th, c, es);
+      }),
+    })));
+    if (scopeAll) {
+      setChords(list => list.map(c => {
+        const es = applyGlobalBoardScale(mergeChordSettings(gdef, c.settings), gdef);
+        return applyThemeToChord(th, c, es);
+      }));
+    }
+    flash(`🎨 Theme "${th.name}" applied to ${scopeAll ? 'ALL chords' : `the selected chord`} (${th.mode === 'absolute' ? 'absolute pitch classes' : 'relative to each chord root'})`);
+  };
+
+  /** Persist an edited theme (update in place by id, or append when new). */
+  const onSaveTheme = (th: NoteTheme) => {
+    setThemes(list => {
+      const i = list.findIndex(x => x.id === th.id);
+      if (i < 0) return [...list, th];
+      const out = [...list];
+      out[i] = th;
+      return out;
+    });
+    setThemeEdit(null);
+    flash(`💾 Theme "${th.name}" saved`);
+  };
+
+  const onDeleteTheme = (id: string) => {
+    setThemes(list => list.filter(x => x.id !== id));
+    flash('🗑 Theme deleted');
   };
 
   /** Page-level ops that MUST create a new page object: React bails out of a
@@ -2362,6 +2430,8 @@ export default function App() {
               }} /></label>
           </span>
           <button className="btn" onClick={() => setShowLib(v => !v)}>📚 Library</button>
+          <button className={`btn ${showThemes ? 'active' : ''}`} onClick={() => setShowThemes(v => !v)}
+            title="Note themes: reusable color + shape + text assignments for the 12 chromatic slots (relative to a chord root, or absolute pitch classes). Apply one in a click instead of restyling dots by hand.">🎨 Themes</button>
           <button className="btn" onClick={() => setShowSettings(v => !v)}>⚙ Settings</button>
         </div>
       </header>
@@ -2725,6 +2795,32 @@ export default function App() {
             <div className="mini-note">Click ＋ Add to drop the chord as a NEW box on the current page (placed clear of existing chords; undoable with Ctrl+Z).</div>
           </div>
         </div>
+      )}
+
+      {showThemes && !themeEdit && (
+        <ThemePanel
+          themes={themes}
+          settings={settings}
+          customs={customs}
+          applyAll={applyAllChords}
+          hasSelection={!!selectedId}
+          onEdit={th => setThemeEdit(th)}
+          onDelete={onDeleteTheme}
+          onAdd={th => { setThemes(list => [...list, th]); setThemeEdit(structuredClone(th)); }}
+          onApply={th => onApplyTheme(th)}
+          onClose={() => setShowThemes(false)}
+        />
+      )}
+
+      {themeEdit && (
+        <ThemeDialog
+          theme={themeEdit}
+          settings={eff}
+          customs={customs}
+          onSave={th => { onSaveTheme(th); if (!showThemes) setShowThemes(true); }}
+          onApply={th => { onSaveTheme(th); setShowThemes(true); onApplyTheme(th); }}
+          onClose={() => setThemeEdit(null)}
+        />
       )}
 
       {editing && editItem && (
