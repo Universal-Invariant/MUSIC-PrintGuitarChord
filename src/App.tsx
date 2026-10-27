@@ -258,6 +258,11 @@ export default function App() {
   /** True right after beginItemDrag: the next applyItemDrag re-measures the
    *  grab offset against the freshly rendered doc (see beginItemDrag). */
   const pendingReanchorRef = useRef(false);
+  /** True while the SHIFT key is held down (tracked from real key events).
+   *  MouseEvents report `shiftKey` unreliably on mouseup in some browsers —
+   *  e.g. releasing shift just before the button can clear the flag mid
+   *  gesture — so every "was this a shift-move?" check consults THIS first. */
+  const shiftHeldRef = useRef(false);
   const [patchClip, setPatchClip] = useState<ReturnType<typeof chordPatchFrom> | null>(null);
 
   // ---------- undo / redo (HistoryManager over `pages` + `chords` slices) ----------
@@ -975,6 +980,30 @@ export default function App() {
     });
   };
 
+  /** Delete one item (dot / text / fingering) of chord `id`, history-aware.
+   *  Used by the Ctrl/Cmd+Click delete gesture on both the external editor
+   *  board and inline page chords. Dot deletion respects mirror/8va twin
+   *  semantics (same as the dialog's Delete button). */
+  const deleteItemAt = (cid: string, s: NonNullable<Sel>): boolean => {
+    if (!page) return false;
+    const doc = page.chords.find(c => c.id === cid);
+    if (!doc) return false;
+    const es = applyGlobalBoardScale(mergeChordSettings(settings, doc.settings), settings);
+    mutateOn(cid, d => {
+      if (s.kind === 'dot') {
+        const anchor = d.dots.find(x => x.id === s.id);
+        d.dots = anchor ? mirrorRemove(d.dots, anchor, es) : d.dots.filter(x => x.id !== s.id);
+      }
+      if (s.kind === 'text') d.texts = d.texts.filter(x => x.id !== s.id);
+      if (s.kind === 'fing') d.fingerings = d.fingerings.filter(x => x.id !== s.id);
+      return d;
+    });
+    setSel(null);
+    setEditing(cur => (cur && cur.id === s.id ? null : cur));
+    flash('Item deleted (Ctrl+Z to undo)');
+    return true;
+  };
+
   /** One click inside a chord board with an EDITING tool (strict hit-test). */
   const handleBoardClickLocal = (local: { x: number; y: number }, e: React.MouseEvent, id?: string): boolean => {
     if (draggingRef.current) return true;      // mid drag gesture — swallow stale clicks
@@ -994,6 +1023,8 @@ export default function App() {
       // instead of stacking a new one on top of it.
       const existing = pickItemAt(cid, x, y);
       if (existing && existing.kind === 'text') {
+        // Ctrl/Cmd+click → delete the box (same gesture as the inline page).
+        if (e.ctrlKey || e.metaKey) { deleteItemAt(cid, existing); return true; }
         // Arm a drag-or-edit gesture: moving repositions the box, releasing
         // without movement opens its edit dialog (see endItemDrag).
         beginItemDrag(cid, existing, local, { x: e.clientX, y: e.clientY });
@@ -1038,6 +1069,8 @@ export default function App() {
   const onBoardClick = (e: React.MouseEvent) => {
     if (!entry || draggingRef.current || pageDrag) return;
     e.stopPropagation();
+    const local = toBoardCoords(e);
+    if (!local) return;                       // board not measurable — never act on (0,0)
     // Some browsers suppress dblclick when the second click's default is prevented
     // anywhere in its path — implement double-click manually (400 ms / 8 px window).
     const now = performance.now();
@@ -1048,7 +1081,7 @@ export default function App() {
       return;
     }
     lastClickRef.current = { x: e.clientX, y: e.clientY, t: now };
-    handleBoardClickLocal(toBoardCoords(e), e);
+    handleBoardClickLocal(local, e);
   };
 
   const pickItem = (x: number, y: number): Sel => {
@@ -1121,7 +1154,8 @@ export default function App() {
 
   /** Grab an existing dot or text box of chord `id` for dragging. `local` is in
    *  that chord's own canvas space. Returns true when a drag started. */
-  const beginItemDrag = (id: string, s: NonNullable<Sel>, local: { x: number; y: number }, client?: { x: number; y: number }): boolean => {
+  const beginItemDrag = (id: string, s: NonNullable<Sel>, local: { x: number; y: number } | null, client?: { x: number; y: number }): boolean => {
+    if (!local) return false;                 // unmeasurable pointer — never grab at (0,0)
     const ctx = textDragCtx(id);
     if (!ctx) return false;
     if (s.kind === 'text') {
@@ -1153,7 +1187,8 @@ export default function App() {
 
   /** Grab a text box of chord `id`. `local` is in that chord's own canvas space.
    *  Returns true when a drag started. */
-  const beginTextDrag = (id: string, local: { x: number; y: number }, client?: { x: number; y: number }): boolean => {
+  const beginTextDrag = (id: string, local: { x: number; y: number } | null, client?: { x: number; y: number }): boolean => {
+    if (!local) return false;                 // unmeasurable pointer — never grab at (0,0)
     const ctx = textDragCtx(id);
     if (!ctx) return false;
     const s = pickItemAt(id, local.x, local.y);
@@ -1161,7 +1196,8 @@ export default function App() {
     return false;
   };
 
-  const applyItemDrag = (local: { x: number; y: number }, client?: { x: number; y: number }) => {
+  const applyItemDrag = (local: { x: number; y: number } | null, client?: { x: number; y: number }) => {
+    if (!local) return;                       // pointer left the board — hold position
     const ref = dragRef.current;
     if (!ref || !draggingRef.current) return;
     if (!sel && !itemDragPressRef.current) return;
@@ -1265,11 +1301,24 @@ export default function App() {
 
   const onBoardPointerDown = (e: React.MouseEvent) => {
     if (!entry || draggingRef.current) return;
+    // Ctrl/Cmd + press on an item → DELETE it immediately (the requested
+    // delete gesture). Handled here, on mousedown, because the browser fires
+    // contextmenu/text-selection quirks around ctrl+click and the plain
+    // "click" path never reliably sees the modifier.
+    if ((e.ctrlKey || e.metaKey) && selectedId) {
+      const local = toBoardCoords(e);
+      if (local) {
+        const s = pickItemAt(selectedId, local.x, local.y);
+        if (s) { e.preventDefault(); e.stopPropagation(); lastClickRef.current = null; deleteItemAt(selectedId, s); return; }
+      }
+    }
     // With the SELECT tool any text box is grabbable directly. With the TEXT
     // tool the press was already armed by handleBoardClickLocal (mousedown
     // fires before click), so do not re-begin it here or we would restart the
     // gesture with a wrong grab offset.
-    if (tool !== 'select') return;
+    // SHIFT is always honoured too — shift+press grabs ANY dot/text for a
+    // move regardless of the active tool ("move mode" gesture).
+    if (tool !== 'select' && !e.shiftKey) return;
     beginTextDrag(selectedId!, toBoardCoords(e), { x: e.clientX, y: e.clientY });
   };
   const onBoardPointerMove = (e: React.MouseEvent) => {
@@ -1279,6 +1328,30 @@ export default function App() {
   const onBoardPointerUp = () => {
     endItemDrag();
   };
+
+  // Safety net: if the mouse button is released OUTSIDE the board (or the
+  // page lost focus mid-gesture), no board mouseup ever fires and the drag
+  // state would stay armed — the next stray click could then teleport or
+  // "delete" an item. Listen globally and finish/abort any live gesture.
+  useEffect(() => {
+    const up = () => {
+      if (draggingRef.current) cancelItemDrag();
+      if (pageDragRef.current) { pageDragRef.current = null; setPageDrag(false); endDragHistory(); }
+    };
+    const blur = () => up();
+    const kd = (ev: KeyboardEvent) => { if (ev.key === 'Shift') shiftHeldRef.current = true; };
+    const ku = (ev: KeyboardEvent) => { if (ev.key === 'Shift') shiftHeldRef.current = false; };
+    window.addEventListener('mouseup', up);
+    window.addEventListener('blur', blur);
+    window.addEventListener('keydown', kd);
+    window.addEventListener('keyup', ku);
+    return () => {
+      window.removeEventListener('mouseup', up);
+      window.removeEventListener('blur', blur);
+      window.removeEventListener('keydown', kd);
+      window.removeEventListener('keyup', ku);
+    };
+  }, [endDragHistory]);
 
   // ---------- inline editing on the page (INLINE EDIT toggle) ----------
   /** Lenient slot hit-test in a chord's canvas space: ALWAYS snaps to the nearest
@@ -1353,10 +1426,17 @@ export default function App() {
     }
     lastClickRef.current = { x: e.clientX, y: e.clientY, t: now, id };
 
-    // Grab an existing dot (any tool) or text box (select/text tool) -> drag
-    // it. With the TEXT tool this doubles as "click a box to edit it": the
-    // release (endItemDrag) opens the dialog when the pointer never moved.
-    if (near && ((near.kind === 'dot') || ((tool === 'select' || tool === 'text') && near.kind === 'text'))) {
+    // Ctrl/Cmd + click on an item → DELETE it (mirrors the external-editor
+    // board gesture; works for dots, text boxes and fingerings).
+    if ((e.ctrlKey || e.metaKey) && near) { deleteItemAt(id, near); return; }
+
+    // Grab an existing dot or text box -> drag MOVE. Shift+click ALWAYS grabs
+    // an item for moving ("move mode", any tool). Without shift, dots are
+    // still grabbable (they snap back to a slot) and text boxes are grabbable
+    // with the select/text tools; a plain click with the dot tool instead
+    // toggles dots normally.
+    const shiftHeld = shiftHeldRef.current || e.shiftKey;
+    if (near && (shiftHeld || near.kind === 'dot' || ((tool === 'select' || tool === 'text') && near.kind === 'text'))) {
       if (beginItemDrag(id, near, local, { x: e.clientX, y: e.clientY })) return;
     }
 
@@ -1451,20 +1531,27 @@ export default function App() {
   const onChordBoxDown = (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
     if (e.button !== 0) return;               // left button only
-    if (inlineEdit && tool !== 'select') {    // inline edit: interior clicks EDIT, border/frame clicks MOVE
-      const tgt = e.target as Element | null;
-      const onFrame = !!tgt?.closest('.chord-frame');
-      if (onFrame) { startChordMove(id, e); return; }   // frame/border → reposition
-      handleInlineChordClick(id, e);                    // interior → add dots/text/etc.
+    // SHIFT + press inside a chord → "move mode": grab the DOT/TEXT under the
+    // cursor and drag it, even when INLINE EDIT is OFF. Coordinates come from
+    // the chord's own live screen CTM, so the grab point is exact regardless
+    // of page zoom/CSS scale. (Previously shift+press fell through to the
+    // whole-chord move path — or, with stale data, looked like a delete.)
+    const shiftHeld = shiftHeldRef.current || e.shiftKey;
+    if (shiftHeld && !(!inlineEdit && tool === 'select')) {
+      const local = toChordLocalById(id, e.clientX, e.clientY);
+      if (local) {
+        const s = pickItemAt(id, local.x, local.y);
+        if (s && beginItemDrag(id, s, local, { x: e.clientX, y: e.clientY })) return;
+      }
+      // nothing under the cursor → fall through and move the whole chord box
+    }
+    if (!inlineEdit) {                        // plain click grabs the whole box for moving
+      selectChord(id);
+      startChordMove(id, e);
       return;
     }
-    // ALWAYS re-derive the pointer position in THIS chord's page space at grab
-    // time. The sheet can be CSS-scaled (.page-svg max-width), so client px and
-    // SVG units differ by an unknown factor — anchoring here (and re-anchoring
-    // on every move through the same CTM) keeps the box glued to the cursor for
-    // EVERY chord, not just the first one.
-    selectChord(id);
-    startChordMove(id, e);
+    // INLINE EDIT ON: interior clicks EDIT, border/frame clicks MOVE
+    handleInlineChordClick(id, e);
   };
 
   /** Begin a whole-chord repositioning drag from the current pointer event. */
