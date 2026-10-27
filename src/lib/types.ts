@@ -89,6 +89,12 @@ export interface TextBox {
   bold?: boolean;
   italic?: boolean;
   underline?: boolean;
+  /** Stacking level WITHIN this chord (dots are always drawn above every text
+   *  box). Higher ⇒ painted later ⇒ on top of other text boxes of the same
+   *  chord. Never affects stacking against OTHER chords — a text box always
+   *  stays inside its own chord's layer, so another chord with a higher page
+   *  z-order still covers it. Missing ⇒ 0 (legacy documents render as before). */
+  zIndex?: number;
 }
 
 /** Fingering label drawn beside the nut, for one string. Same inheritance
@@ -212,6 +218,21 @@ export interface ChordDoc {
   settings?: Partial<Settings>; // PER-CHORD layout override — each chord keeps its own
                                 // starting fret, frets displayed, taper, spacing etc.
                                 // The effective settings = global defaults ⊕ this patch.
+  /** Page stacking level: chords are painted in ascending z-order, so a higher
+   *  value draws ON TOP of overlapping chords. Missing ⇒ 0 (legacy documents
+   *  keep their original paint order). Controlled from the "Page setup" panel
+   *  (⟲/↑/↓ buttons and the list badge) for the selected chord. */
+  zOrder?: number;
+}
+
+/** Paint order for page chords: ascending zOrder, ties broken by insertion
+ *  order (stable sort keeps legacy behaviour for equal levels). Pure — returns
+ *  new arrays only when an actual reorder is needed. */
+export function orderByZ<T extends ChordDoc>(list: T[]): T[] {
+  if (!list.some(c => (c.zOrder ?? 0) !== 0)) return list; // all default ⇒ original order
+  return list.map((c, i) => ({ c, i })).sort((a, b) =>
+    (a.c.zOrder ?? 0) - (b.c.zOrder ?? 0) || a.i - b.i
+  ).map(x => x.c);
 }
 
 // ---------- helpers ----------
