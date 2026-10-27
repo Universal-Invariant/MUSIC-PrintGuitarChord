@@ -1038,6 +1038,27 @@ export default function App() {
   const onBoardClick = (e: React.MouseEvent) => {
     if (!entry || draggingRef.current || pageDrag) return;
     e.stopPropagation();
+
+    // Ctrl/Cmd + Click → DELETE whatever is under the cursor (text box, dot,
+    // or fingering). mutateOn is history-aware so this is undoable (Ctrl+Z).
+    if ((e.ctrlKey || e.metaKey) && tool !== 'dot') {
+      const local = toBoardCoords(e);
+      if (!local) return;
+      const s = pickItemAt(selectedId ?? '', local.x, local.y);
+      const cid = selectedId;
+      if (s && cid) {
+        lastClickRef.current = null;
+        mutateOn(cid, d => {
+          if (s.kind === 'text') d.texts = d.texts.filter(t => t.id !== s.id);
+          else if (s.kind === 'dot') d.dots = d.dots.filter(t => t.id !== s.id);
+          else d.fingerings = d.fingerings.filter(t => t.id !== s.id);
+          return d;
+        });
+        setSel(null);
+        return;
+      }
+    }
+
     // Some browsers suppress dblclick when the second click's default is prevented
     // anywhere in its path — implement double-click manually (400 ms / 8 px window).
     const now = performance.now();
@@ -1269,6 +1290,18 @@ export default function App() {
 
   const onBoardPointerDown = (e: React.MouseEvent) => {
     if (!entry || draggingRef.current) return;
+    // SHIFT + press → dedicated MOVE mode, available with ANY tool and even
+    // right after creating a text box (no need to switch to the Select tool).
+    // We hit-test under the cursor ourselves and arm the drag gesture.
+    if (e.shiftKey && selectedId) {
+      const local = toBoardCoords(e);
+      if (!local) return;
+      const s = pickItemAt(selectedId, local.x, local.y);
+      if (s) {
+        setSel(s);
+        if (beginItemDrag(selectedId, s, local, { x: e.clientX, y: e.clientY })) return;
+      }
+    }
     // With the SELECT tool any text box is grabbable directly. With the TEXT
     // tool the press was already armed by handleBoardClickLocal (mousedown
     // fires before click), so do not re-begin it here or we would restart the
@@ -1459,6 +1492,40 @@ export default function App() {
   const onChordBoxDown = (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
     if (e.button !== 0) return;               // left button only
+
+    // SHIFT + press → MOVE the text/dot/fingering INSIDE the chord, with any
+    // tool, even while INLINE EDIT is on. This runs BEFORE the inline-edit
+    // branch so a shift-drag never creates a new box or moves the whole chord.
+    if (e.shiftKey) {
+      const local = toChordLocalById(id, e.clientX, e.clientY);
+      if (local) {
+        const s = pickItemAt(id, local.x, local.y);
+        if (s) {
+          selectChord(id);
+          setSel(s);
+          if (beginItemDrag(id, s, local, { x: e.clientX, y: e.clientY })) return;
+        }
+      }
+    }
+
+    // CTRL/CMD + click → DELETE the item under the cursor (undoable).
+    if ((e.ctrlKey || e.metaKey) && inlineEdit) {
+      const local = toChordLocalById(id, e.clientX, e.clientY);
+      if (local) {
+        const s = pickItemAt(id, local.x, local.y);
+        if (s) {
+          mutateOn(id, d => {
+            if (s.kind === 'text') d.texts = d.texts.filter(t => t.id !== s.id);
+            else if (s.kind === 'dot') d.dots = d.dots.filter(t => t.id !== s.id);
+            else d.fingerings = d.fingerings.filter(t => t.id !== s.id);
+            return d;
+          });
+          setSel(null);
+          return;
+        }
+      }
+    }
+
     if (inlineEdit && tool !== 'select') {    // inline edit: interior clicks EDIT, border/frame clicks MOVE
       const tgt = e.target as Element | null;
       const onFrame = !!tgt?.closest('.chord-frame');
@@ -1625,6 +1692,21 @@ export default function App() {
     }
     pageDragRef.current = null;
   };
+
+  // Safety net: if the mouse is released OUTSIDE the canvas/board (e.g. over a
+  // panel or off-window), the element-level mouseup never fires and the drag
+  // gesture would stay armed — subsequent clicks get swallowed ("stuck" items)
+  // or a stale drag ref teleports the next grabbed item. End/cancel on ANY
+  // window-level mouseup.
+  useEffect(() => {
+    const up = () => {
+      endItemDrag();
+      cancelItemDrag();
+    };
+    window.addEventListener('mouseup', up);
+    return () => window.removeEventListener('mouseup', up);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // ---------- dialog apply ----------
   const applyEdit = (kind: 'dot' | 'text' | 'fing', item: any) => {
