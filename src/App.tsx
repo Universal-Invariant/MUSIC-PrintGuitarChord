@@ -1048,7 +1048,9 @@ export default function App() {
       return;
     }
     lastClickRef.current = { x: e.clientX, y: e.clientY, t: now };
-    handleBoardClickLocal(toBoardCoords(e), e);
+    const local = toBoardCoords(e);
+    if (!local) return;
+    handleBoardClickLocal(local, e);
   };
 
   const pickItem = (x: number, y: number): Sel => {
@@ -1076,7 +1078,9 @@ export default function App() {
     if (!entry || draggingRef.current) return;
     e.preventDefault();
     e.stopPropagation();
-    openEditLocal(toBoardCoords(e));
+    const local = toBoardCoords(e);
+    if (!local) return;
+    openEditLocal(local);
   };
 
   // ---------- text-box dragging inside a chord (external editor AND inline) ----------
@@ -1270,11 +1274,15 @@ export default function App() {
     // fires before click), so do not re-begin it here or we would restart the
     // gesture with a wrong grab offset.
     if (tool !== 'select') return;
-    beginTextDrag(selectedId!, toBoardCoords(e), { x: e.clientX, y: e.clientY });
+    const local = toBoardCoords(e);
+    if (!local) return;
+    beginTextDrag(selectedId!, local, { x: e.clientX, y: e.clientY });
   };
   const onBoardPointerMove = (e: React.MouseEvent) => {
     if (!draggingRef.current || !dragRef.current) return;
-    applyItemDrag(toBoardCoords(e), { x: e.clientX, y: e.clientY });
+    const local = toBoardCoords(e);
+    if (!local) return;
+    applyItemDrag(local, { x: e.clientX, y: e.clientY });
   };
   const onBoardPointerUp = () => {
     endItemDrag();
