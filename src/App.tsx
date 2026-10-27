@@ -487,9 +487,9 @@ export default function App() {
     if (!Number.isFinite(n) || n === 0) return;
     const scopeAll = applyAllRef.current;
     if (!scopeAll && !selectedId) { flash('Select a chord first, or switch to 🌐 All chords'); return; }
-    // Consume the wrap toggle: it applies to THIS transpose only, then resets.
+    // Read the wrap toggle: it stays ON/OFF persistently until the user
+    // toggles it again (it no longer resets after each transpose).
     const wrap = transposeWrapRef.current;
-    if (wrap) setTransposeWrap(false);
     pushHistory();
     pushLibHistory();
     const gdef = settingsRef.current;
@@ -2333,8 +2333,8 @@ export default function App() {
               ))}
             </select>
             <button className={`qbtn wrap ${transposeWrap ? 'on' : ''}`}
-              data-tip={'Wrap octave: the NEXT transpose keeps every dot inside its own octave band — pitches pushed past fret 11/23 wrap back to the bottom of that octave ((fret mod 12) + 12·band), filling gaps instead of leaving them.\nE.g. a C scale run up to fret 11 transposed +5 wraps the high dots down, so F-major stays dense.\nOne-shot: it resets after each transpose.'}
-              title="Wrap octave — the next transpose folds wrapped dots back into their own octave band"
+              data-tip={'Wrap octave: while ON, every transpose keeps each dot inside its own octave band — pitches pushed past fret 11/23 wrap back to the bottom of that octave ((fret mod 12) + 12·band), filling gaps instead of leaving them.\nE.g. a C scale run up to fret 11 transposed +5 wraps the high dots down, so F-major stays dense.\nSticky: it stays toggled until you click it again.'}
+              title="Wrap octave — folds wrapped dots back into their own octave band (stays on until toggled off)"
               onClick={() => setTransposeWrap(w => !w)}>⟲ Wrap</button>
           </span>
         </div>
