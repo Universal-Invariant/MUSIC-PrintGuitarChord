@@ -27,7 +27,7 @@ import type { ChordColor, ChordDoc, Dot, Settings } from './types';
 import { uid } from './types';
 import { allShapeNames } from './render';
 import { shapeInner } from './shapes';
-import { LETTER_PC, midiToName, parseKeyString, shapeRootPc } from './music';
+import { LETTER_PC, buildScale, midiToName, parseKeyString, shapeRootPc, tonalLabel } from './music';
 
 /** Canonical sharp / flat names of the 12 pitch classes. */
 export const PC_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
@@ -44,6 +44,13 @@ export interface ThemeSlot {
    *  ('R', 'rEsol', '♮3', …). Relative-mode templates may contain '#' or
    *  'b' tokens that transpose together with the chord (see below). */
   text: string;
+  /** Enharmonic SPELLING preference for this slot, as an alteration offset
+   *  from the canonical sharp spelling: 0 ⇒ C#, -1 ⇒ Db, +1 ⇒ B##, -2 ⇒ Ebbb…
+   *  Capped at |2| double accidentals. Alt+click cycles it. Dots whose own
+   *  `text` was set explicitly (by hand or by the chord editor's accidental
+   *  mode) always win over the theme spelling — the chord specializes the
+   *  theme. */
+  alter: number;
 }
 
 export type ThemeMode = 'absolute' | 'relative';
@@ -68,7 +75,128 @@ export function defaultSlots(): ThemeSlot[] {
     colorIdx: i % 7,
     shapeIdx: i % 7,
     text: '',
+    alter: 0,
   }));
+}
+
+// ---------- enharmonic spelling engine (|alter| ≤ 2) ----------
+
+/** The alteration offset of a letter spelling ('C#' ⇒ +1, 'Ebbb' ⇒ -3). */
+export function spellingAlter(sp: string): number {
+  return (sp.match(/#/g)?.length ?? 0) - (sp.match(/b/g)?.length ?? 0);
+}
+
+/** Pitch class of a letter+accidental spelling (contravariant sharp math:
+ *  B# ≡ C, E# ≡ F; flats mirror it: Cb ≡ B). */
+export function pcOfSpelling(sp: string): number {
+  const m = sp.match(/^([A-Ga-g])([#b♯♭]*)/);
+  if (!m) return NaN;
+  let pc = LETTER_PC[m[1].toUpperCase()];
+  for (const ch of m[2]) pc += (ch === '#' || ch === '♯') ? 1 : -1;
+  return ((pc % 12) + 12) % 12;
+}
+
+/** Every letter-spelling of pitch class `pc` with at most 2 accidentals.
+ *  A sharp raises the pitch one semitone while the letter moves
+ *  contravariantly down the scale (C# = B##; E# = F), a flat does the
+ *  opposite (Db; Cbbb). Natural notes have ONE spelling; chromatic ones
+ *  have up to four (e.g. pc 1 ⇒ C#, B##, Db, Ebbb — capped at |2|). */
+export function spellingsOfPc(pc: number): string[] {
+  const n = ((pc % 12) + 12) % 12;
+  const out: string[] = [];
+  for (const [L, base] of Object.entries(LETTER_PC)) {
+    for (let a = -2; a <= 2; a++) {
+      if ((((base + a) % 12) + 12) % 12 === n) {
+        out.push(L + (a > 0 ? '#'.repeat(a) : a < 0 ? 'b'.repeat(-a) : ''));
+      }
+    }
+  }
+  // canonical-first ordering: naturals keep their single spelling; chromatics
+  // start at the sharp form so the Alt cycle reads C# → B## → Db → Ebbb → back
+  return out.sort((x, y) => {
+    const r = (sp: string) => {
+      const acc = spellingAlter(sp);
+      return acc === 0 ? -1 : acc === 1 ? 0 : acc === -1 ? 1 : acc === 2 ? 2 : 3;
+    };
+    return r(x) - r(y);
+  });
+}
+
+/** Enumerate every degree-style label whose semitone value lands on a pitch
+ *  enharmonically reachable from `rel` within |alter| ≤ 2. Two numbering
+ *  conventions are produced together so the Alt cycle can walk through both:
+ *  • chromatic (root = 1, octave = 8, like the editor's 'degree' mode):
+ *    rel 1 ⇒ 2, #2, b3, ##2, bb3
+ *  • tonal/diatonic (scale degrees of the root's major scale, like the
+ *    editor's 'tonal' mode): rel 1 ⇒ #1, b2, ##1, bb2
+ *  Canonical spelling first, then alterations walking outward (# before b). */
+export function degreeCycle(rel: number): string[] {
+  const r = ((rel % 12) + 12) % 12;
+  const pcs = [r, (((r - 1) % 12) + 12) % 12, (((r + 1) % 12) + 12) % 12];
+  const out: string[] = [];
+  const push = (lbl: string) => { if (lbl && !out.includes(lbl)) out.push(lbl); };
+  for (const pc of pcs) {
+    // chromatic degree of this pc
+    push(String(pc + 1));
+    // tonal spelling via the major scale rooted at slot 0
+    const scale = buildScale(0, false);
+    push(tonalLabel(pc, scale));
+  }
+  return out;
+}
+
+/** Enumerate every interval-name spelling of the semitone distance `rel`
+ *  reachable within |alter| ≤ 2. Intervals carry no sharps/flats —
+ *  augmenting/diminishing IS the enharmonic axis here (+1 = A1 = b2,
+ *  +4 = A4 = -5 = TT). Canonical name first, then alterations outward. */
+export function intervalCycle(rel: number): string[] {
+  const r = ((rel % 12) + 12) % 12;
+  const out: string[] = [];
+  const push = (nm: string) => { if (nm && !out.includes(nm)) out.push(nm); };
+  for (const s of [r, (((r - 1) % 12) + 12) % 12, (((r + 1) % 12) + 12) % 12]) {
+    const deg = (s % 7) + 1;                 // generic degree of that pc region
+    const alter = s >= 7 ? s - 7 : 0;        // octave region ⇒ augmented
+    if (deg === 1) push(alter === 0 ? 'R' : alter > 0 ? 'A1' : 'd1');
+    else if (alter === 0) push(['m', 'M'][Math.floor(s / 4)] + String(deg));
+    else push(alter > 0 ? 'A' + deg : '-' + deg);
+  }
+  return out;
+}
+
+export type LabelStyle = 'letter' | 'degree' | 'interval';
+
+/** Full cycle list for one slot under a style — what Alt+click walks through. */
+export function cycleForSlot(theme: NoteTheme, slot: number, style: LabelStyle): string[] {
+  if (style === 'degree') return degreeCycle(slot);
+  if (style === 'interval') return intervalCycle(slot);
+  // letters are spelled against the theme's root note (absolute: the slot IS
+  // the pitch class; relative: root + semitones — identical arithmetic here)
+  return spellingsOfPc(theme.rootPc + slot);
+}
+
+/** Advance a slot's enharmonic spelling by one step of the Alt cycle. The
+ *  current position is found by matching the slot's existing text against the
+ *  cycle (so an already-cycled 'Db' continues to 'Ebbb'); anything not in the
+ *  cycle restarts from the canonical spelling. Returns the new {text, alter}. */
+export function altCycleSlot(theme: NoteTheme, slot: number, style: LabelStyle): Pick<ThemeSlot, 'text' | 'alter'> {
+  const cur = theme.slots[slot];
+  const cyc = cycleForSlot(theme, slot, style);
+  if (!cyc.length) return { text: cur?.text ?? '', alter: cur?.alter ?? 0 };
+  const txt = (cur?.text ?? '').trim();
+  let idx = txt ? cyc.findIndex(c => c.toLowerCase() === txt.toLowerCase()) : -1;
+  if (idx < 0) idx = -1;                       // custom/empty text ⇒ next click shows the canonical spelling
+  const next = cyc[(idx + 1) % cyc.length];
+  const alter = style === 'letter' ? spellingAlter(next) : 0;
+  return { text: next, alter };
+}
+
+/** Resolve a slot's displayed TEXT under a label style. Explicit literal text
+ *  always wins; otherwise the auto suggestion follows the style: letter /
+ *  degree / interval — each starting at its canonical spelling. */
+export function slotDisplayText(theme: NoteTheme, slot: number, style: LabelStyle): string {
+  const s = theme.slots[slot];
+  if (s && s.text.trim() !== '') return s.text;
+  return cycleForSlot(theme, slot, style)[0] ?? '';
 }
 
 export function makeTheme(name: string): NoteTheme {
@@ -105,6 +233,7 @@ export function normalizeTheme(t: unknown): NoteTheme | null {
       colorIdx: Math.max(0, num(s?.colorIdx, i % 7)),
       shapeIdx: Math.max(0, num(s?.shapeIdx, i % 7)),
       text: typeof s?.text === 'string' ? s.text : '',
+      alter: Math.max(-2, Math.min(2, num(s?.alter, 0))),
     };
   });
   return {
@@ -177,19 +306,40 @@ export function suggestSlotText(theme: NoteTheme, slot: number): string {
 
 /** Apply a theme to ONE dot: sets colorIdx / shapeIdx; writes the slot's
  *  literal text when non-empty (empty ⇒ the dot keeps its own text/auto
- *  label). Never touches position or stacking fields. */
-export function applyThemeToDot(theme: NoteTheme, d: Dot, rootPc: number, s: Settings): Dot {
+ *  label). A slot whose spelling was Alt-cycled (`alter` ≠ 0) rewrites ONLY
+ *  the accidental part of an existing LETTER-like label — but a dot that
+ *  carries an explicit text set by hand (or by the chord editor's accidental
+ *  mode) is never touched: the chord specializes the theme.
+ *  Never touches position or stacking fields. */
+export function applyThemeToDot(
+  theme: NoteTheme, d: Dot, rootPc: number, s: Settings,
+  opts?: { hadExplicitText?: boolean },
+): Dot {
   const slot = theme.slots[slotForPc(theme, dotPc(d, s), rootPc)];
   if (!slot) return d;
   const nd: Dot = { ...d, colorIdx: slot.colorIdx, shapeIdx: slot.shapeIdx };
-  if (slot.text !== '') nd.text = slot.text;
+  if (opts?.hadExplicitText) return nd;          // per-chord text wins over the theme
+  if (slot.text !== '') { nd.text = slot.text; return nd; }
+  if (slot.alter !== 0) {
+    // re-spell the dot's AUTO letter label enharmonically (C# ⇄ Db ⇄ B##…)
+    const midi = (s.tuning[d.string] ?? 64) + Math.max(0, d.fret);
+    const base = pcOfSpelling(midiToName(midi, false));   // canonical sharp name
+    const sp = spellingsOfPc(base);
+    const want = sp.find(x => spellingAlter(x) === slot.alter);
+    if (want) nd.text = want;
+  }
   return nd;
 }
 
-/** Themed copy of a whole chord doc (apply-to-page / apply-to-library). */
+/** Themed copy of a whole chord doc (apply-to-page / apply-to-library).
+ *  Dots that already carry a manually-set text are left alone — the chord
+ *  editor's own labels/accidentals OVERRIDE the theme's spelling. */
 export function applyThemeToChord(theme: NoteTheme, doc: ChordDoc, s: Settings): ChordDoc {
   const rootPc = theme.mode === 'relative' ? chordRootPc(doc, s, theme.rootPc) : theme.rootPc;
-  return { ...doc, dots: doc.dots.map(d => applyThemeToDot(theme, d, rootPc, s)) };
+  return {
+    ...doc,
+    dots: doc.dots.map(d => applyThemeToDot(theme, d, rootPc, s, { hadExplicitText: d.text.trim() !== '' })),
+  };
 }
 
 // ---------- transpose interaction ----------
@@ -251,11 +401,13 @@ export function shiftThemeTexts(theme: NoteTheme, n: number): NoteTheme {
 // ---------- preview strip ----------
 
 /** Small themed-dot SVG for the theme list rows ("what does this theme look
- *  like"): 12 glyphs, one per slot, tinted with the basket colors. */
-export function themeStripSvg(theme: NoteTheme, s: Settings, customs: Record<string, string>, size = 18): string {
+ *  like"): 12 glyphs, one per slot, tinted with the basket colors — each with
+ *  its label text inside (explicit template or the canonical auto spelling),
+ *  so a glance shows what applying the theme writes onto the dots. */
+export function themeStripSvg(theme: NoteTheme, s: Settings, customs: Record<string, string>, size = 26): string {
   const gap = size * 1.12;
   const w = gap * 12;
-  const h = size;
+  const h = size + 4;
   const parts: string[] = [`<svg xmlns="http://www.w3.org/2000/svg" width="${w.toFixed(1)}" height="${h}" viewBox="0 0 ${w.toFixed(1)} ${h}">`];
   const all = allShapeNames(s);
   for (let i = 0; i < 12; i++) {
@@ -268,6 +420,12 @@ export function themeStripSvg(theme: NoteTheme, s: Settings, customs: Record<str
       `<g transform="translate(${cx.toFixed(1)},${cy.toFixed(1)}) scale(${sc.toFixed(4)}) translate(-50,-50)" style="color:${c.hex}${Math.round(Math.max(0, Math.min(1, c.alpha)) * 255).toString(16).padStart(2, '0')}">` +
       shapeInner(shapeName, customs) + '</g>',
     );
+    // label: explicit template wins, else the canonical auto letter of the slot
+    const label = slot.text.trim() !== '' ? slot.text : spellingsOfPc(theme.rootPc + i)[0] ?? '';
+    if (label) {
+      const fs = Math.max(7, size * 0.32 * (label.length > 2 ? 0.8 : 1));
+      parts.push(`<text x="${cx.toFixed(1)}" y="${cy.toFixed(1)}" font-size="${fs.toFixed(1)}" text-anchor="middle" dominant-baseline="central" font-weight="bold" fill="#ffffff">${label.replace(/&/g, '&amp;').replace(/</g, '&lt;')}</text>`);
+    }
   }
   parts.push('</svg>');
   return parts.join('');
