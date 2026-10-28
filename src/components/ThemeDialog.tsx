@@ -2,11 +2,15 @@
 //
 // A single 12-dot row IS the grid (colors / shapes / text collapsed into one
 // cell per chromatic slot), exactly like the on-board dots:
-//   • Shift+click a dot  → cycle its COLOR   (same as shift-click on fretboard)
-//   • Ctrl +click a dot  → cycle its SHAPE   (same as ctrl-click on fretboard)
+//   • Shift+click a dot  → cycle its COLOR      (same as shift-click on fretboard)
+//   • Ctrl +click a dot  → cycle its SHAPE      (same as ctrl-click on fretboard)
+//   • Alt  +click a dot  → cycle its ENHARMONIC spelling (C# → B## → Db → Ebbb…)
 //   • plain click        → edit the dot's TEXT inline
-// The row is prefixed with an "R" tag showing which note the first slot maps
-// to under the current mode/root settings.
+// Every dot SHOWS its current text: the literal template when set, otherwise
+// the auto suggestion for the chosen label style (letters / degrees /
+// intervals) — so switching mode, root or style immediately previews what an
+// apply would look like. The row is prefixed with an "R" tag showing which
+// note the first slot maps to under the current mode/root settings.
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ChordColor, Settings } from '../lib/types';
@@ -14,8 +18,8 @@ import { col } from '../lib/types';
 import { allShapeNames } from '../lib/render';
 import { shapeInner } from '../lib/shapes';
 import ColorPicker from './ColorPicker';
-import type { NoteTheme } from '../lib/themes';
-import { PC_NAMES, suggestSlotText } from '../lib/themes';
+import type { LabelStyle, NoteTheme } from '../lib/themes';
+import { PC_NAMES, altCycleSlot, slotDisplayText, suggestSlotText } from '../lib/themes';
 
 interface Props {
   theme: NoteTheme;               // working COPY — the dialog never mutates the store
@@ -35,6 +39,7 @@ export default function ThemeDialog({ theme, settings, customs, onSave, onApply,
   const [textDraft, setTextDraft] = useState('');
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [pickerSlot, setPickerSlot] = useState<number | null>(null);
+  const [style, setStyle] = useState<LabelStyle>('letter');
   const textRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => { if (editingSlot != null) textRef.current?.focus(); }, [editingSlot]);
@@ -69,36 +74,60 @@ export default function ThemeDialog({ theme, settings, customs, onSave, onApply,
   const onDotClick = (e: React.MouseEvent, i: number) => {
     if (e.shiftKey) { e.preventDefault(); patchSlot(i, s => { s.colorIdx = cycleColorOf(s.colorIdx); }); return; }
     if (e.ctrlKey || e.metaKey) { e.preventDefault(); patchSlot(i, s => { s.shapeIdx = cycleShapeOf(s.shapeIdx); }); return; }
+    if (e.altKey) {
+      e.preventDefault();
+      // Alt+click ⇒ enharmonic cycle (C# → B## → Db → Ebbb → back). Natural
+      // notes have no enharmonic alternatives within the |2|-accidental cap.
+      patch(x => {
+        const upd = altCycleSlot(x, i, style);
+        x.slots[i].text = upd.text;
+        x.slots[i].alter = upd.alter;
+      });
+      return;
+    }
     // plain click ⇒ inline text edit for this slot
     setEditingSlot(i);
     setTextDraft(t.slots[i].text);
   };
 
   const commitText = () => {
-    if (editingSlot != null) patchSlot(editingSlot, s => { s.text = textDraft; });
+    if (editingSlot != null) {
+      patchSlot(editingSlot, s => {
+        s.text = textDraft;
+        // keep the alter flag in sync when the draft looks like a letter spelling
+        const m = textDraft.trim().match(/^([A-Ga-g])(#{1,2}|b{1,2})$/);
+        s.alter = m ? ((m[2].match(/#/g)?.length ?? 0) - (m[2].match(/b/g)?.length ?? 0)) : s.alter;
+      });
+    }
     setEditingSlot(null);
   };
 
   const slotColor = (idx: number): ChordColor => basket[idx % Math.max(1, basket.length)] ?? { hex: '#000000', alpha: 1 };
 
+  /** Text shown on a slot dot: explicit template wins; otherwise the auto
+   *  suggestion for the current label style (live with mode/root changes). */
+  const displayFor = (i: number): string => slotDisplayText(t, i, style);
+
+  // ---- big live preview strip (SVG, same glyphs/labels as the interactive row) ----
   const previewSvg = useMemo(() => {
-    const size = 46, gap = size * 1.18;
-    const w = gap * 12, h = size + 14;
-    const parts: string[] = [`<svg xmlns="http://www.w3.org/2000/svg" width="${w.toFixed(1)}" height="${h}" viewBox="0 0 ${w.toFixed(1)} ${h}">`];
+    const size = 58, gap = size * 1.14;
+    const w = gap * 12, h = size + 20;
+    const parts: string[] = [`<svg xmlns="http://www.w3.org/2000/svg" width="100%" viewBox="0 0 ${w.toFixed(1)} ${h}" preserveAspectRatio="xMidYMid meet" style="max-width:${w}px;display:block;margin:0 auto">`];
     t.slots.forEach((slot, i) => {
       const c = slotColor(slot.colorIdx);
       const name = shapes[Math.min(slot.shapeIdx, shapes.length - 1)] ?? 'circle';
       const cx = gap * i + size / 2;
+      const cy = size / 2 + 2;
       const sc = (size * 0.46) / 50;
-      parts.push(`<g transform="translate(${cx.toFixed(1)},${(size / 2 + 2).toFixed(1)}) scale(${sc.toFixed(4)}) translate(-50,-50)" style="color:${col(c)}">${shapeInner(name, customs)}</g>`);
-      const label = slot.text !== '' ? slot.text : '';
-      if (label) parts.push(`<text x="${cx.toFixed(1)}" y="${(size / 2 + 2).toFixed(1)}" font-size="${(size * 0.4).toFixed(1)}" text-anchor="middle" dominant-baseline="central" font-weight="bold" fill="#ffffff" stroke="#00000022">${label.replace(/&/g, '&amp;').replace(/</g, '&lt;')}</text>`);
-      parts.push(`<text x="${cx.toFixed(1)}" y="${(h - 2).toFixed(1)}" font-size="9" text-anchor="middle" fill="#8b93a7">${SLOT_TAG(t.mode, t.rootPc, i)}</text>`);
+      parts.push(`<g transform="translate(${cx.toFixed(1)},${cy.toFixed(1)}) scale(${sc.toFixed(4)}) translate(-50,-50)" style="color:${col(c)}">${shapeInner(name, customs)}</g>`);
+      const label = displayFor(i);
+      if (label) parts.push(`<text x="${cx.toFixed(1)}" y="${cy.toFixed(1)}" font-size="${(size * 0.34).toFixed(1)}" text-anchor="middle" dominant-baseline="central" font-weight="bold" fill="#ffffff" stroke="#00000022">${label.replace(/&/g, '&amp;').replace(/</g, '&lt;')}</text>`);
+      parts.push(`<text x="${cx.toFixed(1)}" y="${(h - 2).toFixed(1)}" font-size="10" text-anchor="middle" fill="#8b93a7">${SLOT_TAG(t.mode, t.rootPc, i)}</text>`);
     });
     parts.push('</svg>');
     return parts.join('');
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [t, basket, shapes, customs]);
+  }, [t, basket, shapes, customs, style]);
 
   return (
     <div className="overlay" onMouseDown={e => { if (e.target === e.currentTarget) onClose(); }}>
@@ -120,11 +149,17 @@ export default function ThemeDialog({ theme, settings, customs, onSave, onApply,
             <option value="relative">Relative (to chord root)</option>
             <option value="absolute">Absolute (pitch class)</option>
           </select>
-          <label title="Reference note: absolute-mode letter anchor / relative-mode spelling base for the text suggestions">{t.mode === 'absolute' ? 'Root note' : 'Spelling root'}</label>
+          <label title="Reference note: absolute-mode letter anchor / relative-mode spelling base for the dot labels">{t.mode === 'absolute' ? 'Root note' : 'Spelling root'}</label>
           <select className="sel" value={String(t.rootPc)} onChange={e => patch(x => { x.rootPc = Number(e.target.value); })}>
             {PC_NAMES.map((n, i) => <option key={i} value={i}>{n}</option>)}
           </select>
           <label className="chk"><input type="checkbox" checked={t.preferFlats} onChange={e => patch(x => { x.preferFlats = e.target.checked; })} /> ♭ flats</label>
+          <label title="How the dots are labeled in this preview: actual note letters, chromatic/tonal degrees, or interval names. Alt+click cycles each dot's enharmonic spelling within that style.">Style</label>
+          <select className="sel" value={style} onChange={e => setStyle(e.target.value as LabelStyle)}>
+            <option value="letter">Letters</option>
+            <option value="degree">Degrees</option>
+            <option value="interval">Intervals</option>
+          </select>
         </div>
 
         {/* ---- the single 12-dot row (the whole grid) ---- */}
@@ -135,21 +170,23 @@ export default function ThemeDialog({ theme, settings, customs, onSave, onApply,
               const c = slotColor(slot.colorIdx);
               const name = shapes[Math.min(slot.shapeIdx, shapes.length - 1)] ?? 'circle';
               const active = editingSlot === i;
+              const label = displayFor(i);
               return (
                 <button key={i}
                   className={`theme-dot${active ? ' active' : ''}`}
                   style={{ ['--tdot' as never]: col(c) }}
-                  title={`Slot ${i + 1} (${SLOT_TAG(t.mode, t.rootPc, i)})\nShift+click: cycle color\nCtrl+click: cycle shape\nClick: edit text`}
+                  title={`Slot ${i + 1} (${SLOT_TAG(t.mode, t.rootPc, i)})\nShift+click: cycle color\nCtrl+click: cycle shape\nAlt+click: cycle enharmonic spelling\nClick: edit text`}
                   onClick={e => onDotClick(e, i)}>
-                  <svg width="34" height="34" viewBox="0 0 100 100" style={{ color: col(c) }}>
+                  <svg width="52" height="52" viewBox="0 0 100 100" style={{ color: col(c) }}>
                     <g dangerouslySetInnerHTML={{ __html: shapeInner(name, customs) }} />
                   </svg>
-                  <span className="theme-dot-text">{slot.text !== '' ? slot.text : ''}</span>
+                  <span className="theme-dot-text">{label}</span>
                 </button>
               );
             })}
           </div>
         </div>
+        <p className="mini-note">The dots show their live labels — change Mode / Root / Style above and watch them re-spell. Alt+click walks a dot through its enharmonics (e.g. C# → B## → Db → Ebbb, capped at two accidentals; naturals stay put).</p>
 
         {editingSlot != null && (
           <div className="row theme-text-edit">
@@ -195,7 +232,7 @@ export default function ThemeDialog({ theme, settings, customs, onSave, onApply,
               </div>
             </>
           )}
-          <p className="mini-note">Tip: Shift/Ctrl-click the dots directly is faster — this panel is for exact picks.</p>
+          <p className="mini-note">Tip: Shift/Ctrl/Alt-click the dots directly is faster — this panel is for exact picks.</p>
         </details>
 
         <div className="theme-preview" dangerouslySetInnerHTML={{ __html: previewSvg }} />
