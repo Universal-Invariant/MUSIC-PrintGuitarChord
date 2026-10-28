@@ -4,17 +4,18 @@ import fs from "fs";
 import path from "path";
 import os from "os";
 
-// Unique per project so multiple vite instances don't fight over the same file.
-const ACTION_FILE = path.join(os.tmpdir(), `vite_action_35ss442.tmp`);
+// Read the dynamic action file path passed from the batch script via environment variables.
+const ACTION_FILE = process.env.ACTION_FILE || path.join(os.tmpdir(), `vite_action_fallback_${process.pid}.tmp`);
 
 /**
- * CLI shortcut: press `b` in the terminal running `npm run dev` to write a
- * "rebuild" marker and shut down the dev server. Pair with the `rerun` script
- * (`npm run dev:loop`) which sees the marker, rebuilds, and restarts vite.
+ * CLI shortcuts in the terminal running `npm run dev`:
+ * - `h`: git fetch & hard reset, then restart
+ * - `p`: git pull, then restart
+ * - `n`: npm install & audit fix, then restart
  */
-function rebuildShortcut(): Plugin {
+function devShortcuts(): Plugin {
   return {
-    name: "rebuild-shortcut",
+    name: "dev-shortcuts",
     apply: "serve",
     configureServer(server) {
       const bind = server.bindCLIShortcuts.bind(server);
@@ -24,10 +25,26 @@ function rebuildShortcut(): Plugin {
           customShortcuts: [
             ...(opts?.customShortcuts ?? []),
             {
-              key: "b",
-              description: "fetch, pull, rebuild and restart",
+              key: "h",
+              description: "git fetch & hard reset, then restart",
               async action(server) {
-                fs.writeFileSync(ACTION_FILE, "rebuild", "utf-8");
+                fs.writeFileSync(ACTION_FILE, "h", "utf-8");
+                await server.close();
+              },
+            },
+            {
+              key: "p",
+              description: "git pull, then restart",
+              async action(server) {
+                fs.writeFileSync(ACTION_FILE, "p", "utf-8");
+                await server.close();
+              },
+            },
+            {
+              key: "n",
+              description: "npm install & audit fix, then restart",
+              async action(server) {
+                fs.writeFileSync(ACTION_FILE, "n", "utf-8");
                 await server.close();
               },
             },
@@ -38,18 +55,13 @@ function rebuildShortcut(): Plugin {
 }
 
 export default defineConfig({
-  plugins: [react(), rebuildShortcut()],
+  plugins: [react(), devShortcuts()],
   server: {
-    host: true, // or use '127.0.0.1' or 'localhost'
-    port: 5173, // ensures it stays on your expected port
+    host: true,
+    port: 5173,
   },
   build: {
     outDir: "dist",
     sourcemap: true,
   },
-  inputOptions: {
-    transform: {
-      jsx: "react-jsx" // matches tsconfig.json
-	}
-  }
 });

@@ -1,39 +1,56 @@
 @echo off
-set "ACTION_FILE=%TEMP%\vite_action_35ss442.tmp"
+
+:: %CD% captures the directory you are currently sitting in when you run the command
+set "PROJECT_DIR=%CD%"
+
+:: Generate a unique temporary file path in %TEMP%
+set "ACTION_FILE=%TEMP%\vite_action_%RANDOM%%RANDOM%.tmp"
 if exist "%ACTION_FILE%" del "%ACTION_FILE%"
 
-
-:loop
-del "%ACTION_FILE%" 2>nul
 set "cmd=%1"
 
-if "%cmd%"=="B" (
-  git fetch origin
-  git reset --hard origin/main
-  git log --oneline -1
-  call npm install
-  call npm install-scripts approve esbuild
-  call npm audit fix --force
-)
-call npx tsc -b
-REM copy /Y vite.config.ts web\ > nul
+:loop
+if exist "%ACTION_FILE%" del "%ACTION_FILE%"
 
-REM start /b powershell -WindowStyle Hidden -File c:\Apps\Command\open-browser.ps1 -Url "http://localhost:5173/" -Port 5173 -WindowTitle "ViteTester" -ProfileName "Harmonia"
+if "%cmd%"=="h" (
+    git fetch origin
+    git reset --hard origin/main
+    git log --oneline -1
+)
+
+if "%cmd%"=="p" (
+    git pull
+)
+
+if "%cmd%"=="n" (
+    call npm install
+    call npm install-scripts approve esbuild
+    call npm audit fix --force
+)
+
+call npx tsc -b
+
+:: Export the variable so Vite can read it
+set "ACTION_FILE=%ACTION_FILE%"
 
 call npm run dev
+
 if not exist "%ACTION_FILE%" goto end
 
 set /p ACTION=<"%ACTION_FILE%"
 
-if "%ACTION%"=="rebuild" (
-  set "cmd=B"
-  goto loop
+if "%ACTION%"=="h" (
+    set "cmd=h"
+    goto loop
 )
-
+if "%ACTION%"=="p" (
+    set "cmd=p"
+    goto loop
+)
+if "%ACTION%"=="n" (
+    set "cmd=n"
+    goto loop
+)
 
 :end
 del "%ACTION_FILE%" 2>nul
-
-
-
-
