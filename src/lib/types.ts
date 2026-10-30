@@ -97,6 +97,32 @@ export interface TextBox {
   zIndex?: number;
 }
 
+/** A closed spline region drawn on top of the fretboard (panel, frets and
+ *  strings) but BELOW the dots / text / fingerings — used to circle groups of
+ *  notes. Coordinates are normalized (0..1) over the chord canvas: they ride
+ *  along with the board when orientation / flips / scale change, exactly like
+ *  TextBox positions.
+ *
+ *  Geometry: a CYCLE of control points rendered as a Catmull-Rom spline closed
+ *  through all of them (a smooth "lasso" around whatever is inside). The user
+ *  drags any control point to reshape it, or grabs the fill to move the whole
+ *  region. Double-clicking a segment inserts a new control point there. */
+export interface Region {
+  id: string;
+  /** ≥3 control points, normalized to the chord canvas (x, y in 0..1). */
+  pts: { x: number; y: number }[];
+  /** Fill color; alpha ≈ 0.75 transparency by default ("beige wash"). */
+  color: ChordColor;
+  /** Outline stroke color. */
+  borderColor: ChordColor;
+  /** Outline thickness in px at scale 1. */
+  borderWidth: number;
+}
+
+/** Default region style: beige fill at 75% opacity, warm brown outline. */
+export function defaultRegionColor(): ChordColor { return { hex: '#f5deb3', alpha: 0.75 }; }
+export function defaultRegionBorder(): ChordColor { return { hex: '#b3925a', alpha: 0.9 }; }
+
 /** Fingering label drawn beside the nut, for one string. Same inheritance
  *  rules as TextBox for `font` and `size`. */
 export interface Fingering {
@@ -215,6 +241,10 @@ export interface ChordDoc {
   dots: Dot[];
   texts: TextBox[];
   fingerings: Fingering[];
+  /** Closed spline regions circling groups of notes. Drawn ABOVE the fretboard
+   *  panel / frets / strings but BELOW the dots and text. Missing ⇒ [] so
+   *  legacy documents render exactly as before. */
+  regions?: Region[];
   settings?: Partial<Settings>; // PER-CHORD layout override — each chord keeps its own
                                 // starting fret, frets displayed, taper, spacing etc.
                                 // The effective settings = global defaults ⊕ this patch.
