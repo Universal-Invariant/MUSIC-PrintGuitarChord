@@ -70,6 +70,9 @@ export const DEFAULT_SETTINGS: Settings = {
   fretWidthPct: 100,
   tuning: [...TUNING_HIGH_TO_LOW],
   preferFlats: false,
+  regionSmoothing: 0.6,
+  regionFillAlpha: 0.75,
+  regionBorderColorFollows: false,
   dotMarkerColor: { hex: '#c8bcd0', alpha: 0.9 },
   bgFill: WHITE,
   fretColor: { hex: '#4a4a4a', alpha: 1 },
@@ -271,6 +274,12 @@ export function loadSettings(): Settings {
     if (typeof merged.fretWidthPct !== 'number' || !Number.isFinite(merged.fretWidthPct)) merged.fretWidthPct = 100;
     merged.fretWidthPct = Math.max(50, Math.min(150, merged.fretWidthPct));
     if (typeof merged.preferFlats !== 'boolean') merged.preferFlats = false;
+    // region defaults: smoothing / fill alpha / border-follows-fill
+    if (typeof merged.regionSmoothing !== 'number' || !Number.isFinite(merged.regionSmoothing)) merged.regionSmoothing = DEFAULT_SETTINGS.regionSmoothing;
+    merged.regionSmoothing = Math.max(0, Math.min(1, merged.regionSmoothing));
+    if (typeof merged.regionFillAlpha !== 'number' || !Number.isFinite(merged.regionFillAlpha)) merged.regionFillAlpha = DEFAULT_SETTINGS.regionFillAlpha;
+    merged.regionFillAlpha = Math.max(0.05, Math.min(1, merged.regionFillAlpha));
+    if (typeof merged.regionBorderColorFollows !== 'boolean') merged.regionBorderColorFollows = false;
     // tuning: 6 MIDI numbers, dot-model order (index 0 = high e .. 5 = low E)
     if (!Array.isArray(merged.tuning) || merged.tuning.length !== 6 || merged.tuning.some(v => typeof v !== 'number' || !Number.isFinite(v))) {
       merged.tuning = [...TUNING_HIGH_TO_LOW];

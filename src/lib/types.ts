@@ -117,6 +117,10 @@ export interface Region {
   borderColor: ChordColor;
   /** Outline thickness in px at scale 1. */
   borderWidth: number;
+  /** Spline tension for THIS region's curve, 0..1 (higher ⇒ rounder).
+   *  Missing ⇒ the global default (settings.regionSmoothing). Applied when
+   *  rendering and hit-testing the closed Catmull-Rom outline. */
+  smoothing?: number;
 }
 
 /** Default region style: beige fill at 75% opacity, warm brown outline. */
@@ -228,6 +232,14 @@ export interface Settings {
   defaultTextColor: ChordColor;
   defaultTextSize: number;   // px
   defaultTextRotation: number;
+
+  // --- regions (lassos) ---
+  regionSmoothing: number;   // 0..1 — spline tension applied to NEWLY drawn
+                             // regions (0 = angular polyline, 1 = maximally
+                             // round). Existing regions keep their own stored
+                             // value; the completion dialog can override it.
+  regionFillAlpha: number;   // default fill alpha for new regions (0..1)
+  regionBorderColorFollows: boolean; // border hex mirrors fill hex (alpha 1)
 
   // --- misc ---
   fingeringsLeft: boolean;   // legacy alias of flipAlong (kept for old saved data)
