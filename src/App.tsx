@@ -838,6 +838,21 @@ export default function App() {
     return best;
   };
 
+  /** Midpoint of the spline segment i → (i+1) wraparound, in canvas px.
+   *  Used for "grab the curve to insert a new control point" gestures. */
+  const regionMidAt = (r: Region, x: number, y: number, w: number, h: number, rad: number): number => {
+    let best = -1, bd = rad;
+    const n = r.pts.length;
+    if (n < 2) return best;
+    for (let i = 0; i < n; i++) {
+      const a = r.pts[i], b = r.pts[(i + 1) % n];
+      const mx = ((a.x + b.x) / 2) * w, my = ((a.y + b.y) / 2) * h;
+      const d = Math.hypot(mx - x, my - y);
+      if (d <= bd) { bd = d; best = i; }
+    }
+    return best;
+  };
+
   /** Topmost region under a canvas-space point (control points win over fills). */
   const pickRegionAt = (doc: ChordDoc, x: number, y: number, w: number, h: number): { id: string; pt: number } | null => {
     const rad = Math.max(9, w * 0.025);
@@ -885,20 +900,40 @@ export default function App() {
       out.push(`<circle cx="${(p.x * w).toFixed(1)}" cy="${(p.y * h).toFixed(1)}" r="${(rad * 0.35).toFixed(1)}" fill="#2f81f7" stroke="none"/>`);
       void i;
     });
+    // Small hollow diamonds at each segment MIDPOINT: pressing one inserts a
+    // new control point there (see 'insert' branch of tryRegionGestureDown).
+    const n = r.pts.length;
+    if (n >= 2) for (let i = 0; i < n; i++) {
+      const a = r.pts[i], b = r.pts[(i + 1) % n];
+      const mx = (((a.x + b.x) / 2) * w).toFixed(1), my = (((a.y + b.y) / 2) * h).toFixed(1);
+      out.push(`<circle cx="${mx}" cy="${my}" r="${(rad * 0.55).toFixed(1)}" fill="none" stroke="#2f81f7" stroke-width="1.2" stroke-dasharray="2 2"/>`);
+    }
     return out.join('');
   }
 
-  /** Start dragging a region control point / whole region. */
-  const beginRegionDrag = (cid: string, hit: { id: string; pt: number }, local: { x: number; y: number }, mode: 'pt' | 'move' | 'draw'): boolean => {
+  /** Start dragging a region control point / whole region. `mode === 'insert'`
+   *  first SPLICES a new control point after segment `hit.pt` (at the press
+   *  location) and then drags that brand-new point. */
+  const beginRegionDrag = (cid: string, hit: { id: string; pt: number }, local: { x: number; y: number }, mode: 'pt' | 'move' | 'draw' | 'insert'): boolean => {
     const ctx = regionCtx(cid);
     if (!ctx) return false;
     const r = (ctx.doc.regions ?? []).find(x => x.id === hit.id);
     if (!r) return false;
     pushHistory();                            // ONE snapshot per gesture
     histPausedRef.current = true;             // moves coalesce into that snapshot
-    regionDragRef.current = { cid, id: hit.id, mode, pt: hit.pt, sx: local.x / ctx.w, sy: local.y / ctx.h, orig: r.pts.map(p => ({ ...p })) };
+    let orig = r.pts.map(p => ({ ...p }));
+    let pt = hit.pt;
+    if (mode === 'insert') {
+      const nx = Math.max(-0.2, Math.min(1.2, local.x / ctx.w));
+      const ny = Math.max(-0.2, Math.min(1.2, local.y / ctx.h));
+      const at = ((hit.pt % orig.length) + orig.length) % orig.length;
+      orig.splice(at + 1, 0, { x: nx, y: ny });
+      pt = at + 1;
+      mutateRegionPts(cid, r.id, () => orig.map(p => ({ ...p })));
+    }
+    regionDragRef.current = { cid, id: r.id, mode: mode === 'insert' ? 'pt' : mode, pt, sx: local.x / ctx.w, sy: local.y / ctx.h, orig };
     draggingRef.current = true;
-    setSel({ kind: 'region', id: hit.id });
+    setSel({ kind: 'region', id: r.id });
     return true;
   };
 
@@ -1031,13 +1066,31 @@ export default function App() {
     setEditing: (s: Sel) => void;
     selectChord: (id: string | null) => void;
   } | null>(null);
-  liveRef.current = { pages, pageIdxRef, pickRegionAt, deleteItemAt, pushHistory, flash, setSel, setEditing, selectChord };
+  // NOTE: `deleteItemAt`, `flash` and `selectChord` are declared LATER in this
+  // component (block-scoped consts). Referencing them directly here would be a
+  // temporal-dead-zone use-before-declaration (TS2448/TS2454). We store thin
+  // forwarder closures instead: they only READ the bindings when invoked, and
+  // every invocation happens from event handlers — long after the full render
+  // pass has initialized those consts.
+  liveRef.current = {
+    pages, pageIdxRef, pickRegionAt, pushHistory, setSel, setEditing,
+    deleteItemAt: (cid, s) => deleteItemAt(cid, s),
+    flash: (m) => flash(m),
+    selectChord: (id) => selectChord(id),
+  };
 
   /** Committed-state view of one chord + its native canvas size (LIVE page,
    *  never the render closure). Mirrors textDragCtx's resolution rules. */
   const regionChordView = (cid: string): { doc: ChordDoc; w: number; h: number } | null => {
     const lr = liveRef.current;
     if (!lr) return null;
+    // The gesture's local coords are produced by toEditorBoardCoords, which
+    // maps through the EXTERNAL editor's SVG — i.e. the chord it currently
+    // shows (`selectedId`). If the gesture belongs to a different chord, that
+    // mapping delegated to page-placement math instead; mixing the two would
+    // make points jump, so refuse and let the pointer handlers retry with a
+    // matching view next event.
+    if (cid !== selectedIdRef.current) return null;
     const pg = lr.pages[Math.max(0, Math.min(lr.pages.length - 1, lr.pageIdxRef.current))];
     const doc = pg?.chords.find(c => c.id === cid);
     if (!doc) return null;
@@ -1088,10 +1141,15 @@ export default function App() {
     // 1) Grab a handle of the currently selected region first — reshaping
     //    must win over creating/moving even under Ctrl+Shift.
     if (sel && sel.kind === 'region') {
-      const hit = ctx.doc.regions?.find(x => x.id === sel.id)
-        ? { id: sel.id, pt: regionPtAt(ctx.doc.regions!.find(x => x.id === sel.id)!, local.x, local.y, ctx.w, ctx.h, rad) }
-        : null;
-      if (hit && hit.pt >= 0) return beginRegionDrag(cid, hit, local, 'pt');
+      const sr = ctx.doc.regions?.find(x => x.id === sel.id);
+      if (sr) {
+        const p = regionPtAt(sr, local.x, local.y, ctx.w, ctx.h, rad);
+        if (p >= 0) return beginRegionDrag(cid, { id: sr.id, pt: p }, local, 'pt');
+        // Hollow midpoint circles: press one to SPLICE a new control point
+        // into the curve there and drag it immediately.
+        const m = regionMidAt(sr, local.x, local.y, ctx.w, ctx.h, rad * 0.8);
+        if (m >= 0) return beginRegionDrag(cid, { id: sr.id, pt: m }, local, 'insert');
+      }
     }
     const wantsCreate = (e.ctrlKey || e.metaKey) && e.shiftKey;
     if (wantsCreate || tool === 'region') {
@@ -2329,6 +2387,7 @@ export default function App() {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); e.shiftKey ? redo() : undo(); }
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') { e.preventDefault(); redo(); }
       if (e.key === 'Delete' || e.key === 'Backspace') {
+        if (sel?.kind === 'region') { deleteSelectedAny(); return; }
         if (sel) {
           mutate(d => {
             if (sel.kind === 'dot') d.dots = d.dots.filter(x => x.id !== sel.id);
@@ -2353,6 +2412,7 @@ export default function App() {
       if (e.key === '2') setTool('text');
       if (e.key === '3') setTool('fing');
       if (e.key === '4') setTool('select');
+      if (e.key === '5') setTool('region');
       if (e.key === 'Escape') { setSel(null); setEditing(null); selectChord(null); }
     };
     window.addEventListener('keydown', h);
@@ -2796,6 +2856,7 @@ export default function App() {
           <button className={`btn tool ${tool === 'dot' ? 'active' : ''}`} onClick={() => setTool('dot')} title="Add/remove note dots on the SELECTED chord. Shift-click cycles colors, Ctrl-click cycles shapes, double-click / Alt+click / right-click edits. [1]">● Dots</button>
           <button className={`btn tool ${tool === 'text' ? 'active' : ''}`} onClick={() => setTool('text')} title="Click anywhere to add a free text box [2]">T Text</button>
           <button className={`btn tool ${tool === 'fing' ? 'active' : ''}`} onClick={() => setTool('fing')} title="Click a string at the far end of the fretboard (opposite the nut) to add a fingering label [3]">① Fingering</button>
+          <button className={`btn tool ${tool === 'region' ? 'active' : ''}`} onClick={() => setTool('region')} title="Region lasso: click-drag to draw a closed spline region around dots (or Ctrl+Shift+click anywhere, even with another tool active, to start one point-by-point — double-click or Enter closes it). Regions sit above frets/strings but below dots/text. Click a region to select; drag its fill to move, drag handles to reshape, drag midpoints to add points. Del deletes. [5]">◌ Region</button>
           <button className={`btn tool ${tool === 'select' ? 'active' : ''}`} onClick={() => setTool('select')} title="Select & drag text boxes, Alt+click / right-click to edit [4]">⇗ Select</button>
           <button className={`btn apply-all ${applyAllChords ? 'active' : ''}`} onClick={toggleApplyAll}
             title={applyAllChords
@@ -2819,6 +2880,28 @@ export default function App() {
           </span>
         </div>
         <div className="toolbar right">
+          {sel?.kind === 'region' && (() => {
+            // Live control bar for the selected region: fill color, border
+            // color (always rendered opaque), and fill transparency. The
+            // border alpha is forced to 1 by setRegionColor/render so edges
+            // always read distinctly from the wash inside.
+            const rg = (page?.chords.find(c => c.id === selectedId)?.regions ?? [])
+              .find(r => r.id === sel.id);
+            if (!rg) return null;
+            return (
+              <span className="quick-ovr region-ctl" title="Selected region controls: pick colors or adjust the fill's transparency. The border is always fully opaque.">
+                <label htmlFor="rg-fill">◌ Region</label>
+                <input id="rg-fill" type="color" value={rg.color.hex} title="Fill color"
+                  onChange={e => setRegionColor('fill', { hex: e.target.value, alpha: rg.color.alpha })} />
+                <input id="rg-border" type="color" value={rg.borderColor.hex} title="Border color (always opaque)"
+                  onChange={e => setRegionColor('border', { hex: e.target.value, alpha: 1 })} />
+                <label htmlFor="rg-alpha" title="Fill transparency (border stays opaque)">α</label>
+                <input id="rg-alpha" type="range" min={0.05} max={1} step={0.05} value={rg.color.alpha}
+                  onChange={e => setRegionColor('fill', { hex: rg.color.hex, alpha: Number(e.target.value) })} />
+                <button className="qbtn" onClick={() => deleteSelectedAny()} title="Delete this region (Del / Ctrl+Z to undo)">✕</button>
+              </span>
+            );
+          })()}
           <button className="btn" onClick={undo} disabled={!canUndo} title={`Undo (Ctrl+Z) — ${hist.undoCount()} step(s)`}>↩ Undo</button>
           <button className="btn" onClick={redo} disabled={!canRedo} title={`Redo (Ctrl+Shift+Z / Ctrl+Y) — ${hist.redoCount()} step(s)`}>↪ Redo</button>
           <button className={`btn ${settings.noteVisible ? 'active' : ''}`} onClick={() => commitGlobalSettings(prev => ({ ...prev, noteVisible: !prev.noteVisible }))}
