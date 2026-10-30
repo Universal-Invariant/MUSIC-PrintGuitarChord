@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as RMouseEvent } from 'react';
-import type { ChordDoc, ChordPlacement, ChordSettingsPatch, Dot, PageConfig, PageDoc, Settings, TextBox } from './lib/types';
+import type { ChordColor, ChordDoc, ChordPlacement, ChordSettingsPatch, Dot, PageConfig, PageDoc, Region, Settings, TextBox } from './lib/types';
 import {
   CHORD_SETTING_KEYS, GLOBAL_ONLY_SETTING_KEYS, MIN_NUM_FRETS, applyGlobalBoardScale,
   bakeInheritedItemsToAllChords, chordPatchFrom, clampNumFrets, clampStartFret, fitsPage,
   sanitizeGlobalValue,
   mergeChordSettings, orderByZ, pageSizePx, placementsOverlap, resolveCollision, snapVal, stripGlobalKeysFromChordDocs,
-  syncKeysToAllChords, uid,
+  syncKeysToAllChords, uid, defaultRegionBorder, defaultRegionColor,
 } from './lib/types';
-import { composePage, cycleColorIndices, cycleShapeIndices, makeDot, renderSvg, svgInner } from './lib/render';
+import { composePage, cycleColorIndices, cycleShapeIndices, makeDot, pointInRegion, regionCanvasPath, renderSvg, svgInner } from './lib/render';
 import {
   NUM_STRINGS, canvasSize, cellCenter, dotAlongFret, fingeringPos, fretPositions, hitTest,
   lengthScale, nutZoneDepth, project, stringLayout, unproject, widthScale,
@@ -27,8 +27,8 @@ import ThemeDialog from './components/ThemeDialog';
 import type { NoteTheme } from './lib/themes';
 import { applyThemeToChord, loadThemes, saveThemes, shiftThemeTexts } from './lib/themes';
 
-type Tool = 'dot' | 'text' | 'fing' | 'select';
-type Sel = { kind: 'dot' | 'text' | 'fing'; id: string } | null;
+type Tool = 'dot' | 'text' | 'fing' | 'region' | 'select';
+type Sel = { kind: 'dot' | 'text' | 'fing' | 'region'; id: string } | null;
 
 /** Approximate on-canvas width of a rendered text box (SVG has no layout API;
  *  average glyph advance ≈ 0.56 × font size is close enough for hit-testing). */
@@ -270,6 +270,11 @@ export default function App() {
   const draggingRef = useRef(false);
   const [pageDrag, setPageDrag] = useState(false);       // chord box drag on the page
   const dragRef = useRef<{ id: string; kind: 'dot' | 'text'; itemId: string; dx: number; dy: number } | null>(null);
+  /** Live region gesture: 'pt' drags one control point (reshape), 'move'
+   *  translates the whole lasso, 'draw' appends points while dragging a NEW
+   *  region with the Region tool. All coords are normalized (0..1) deltas. */
+  const regionDragRef = useRef<{ id: string; mode: 'pt' | 'move' | 'draw'; pt: number; sx: number; sy: number; orig: { x: number; y: number }[] } | null>(null);
+  const [regionColorTarget, setRegionColorTarget] = useState<'fill' | 'border'>('fill');
   const pageDragRef = useRef<{ id: string; sx: number; sy: number; ox: number; oy: number } | null>(null);
   const boardWrapRef = useRef<HTMLDivElement>(null);
   const printRef = useRef<HTMLDivElement>(null);
@@ -812,9 +817,206 @@ export default function App() {
   const sizeRef = useRef(size);
   useEffect(() => { sizeRef.current = size; }, [size]);
   const boardMarkup = useMemo(
-    () => (entry ? renderSvg(entry, eff, { customs }) : ''),
-    [entry, eff, customs],
+    () => (entry ? renderSvg(entry, eff, { customs }) + regionOverlayMarkup() : ''),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [entry, eff, customs, sel],
   );
+
+  // ---------- closed spline REGIONS ("lassos" around groups of dots) ----------
+  /** Everything the region editor needs about one chord, resolved LIVE from
+   *  the committed page (never the render closure) — same discipline as the
+   *  text-drag context, so mid-gesture edits always see fresh points. */
+  const regionCtx = (id: string): { doc: ChordDoc; w: number; h: number } | null => textDragCtx(id);
+
+  /** Find a region control point near a canvas-space point (grab radius in px). */
+  const regionPtAt = (r: Region, x: number, y: number, w: number, h: number, rad: number): number => {
+    let best = -1, bd = rad;
+    r.pts.forEach((p, i) => {
+      const d = Math.hypot(p.x * w - x, p.y * h - y);
+      if (d <= bd) { bd = d; best = i; }
+    });
+    return best;
+  };
+
+  /** Topmost region under a canvas-space point (control points win over fills). */
+  const pickRegionAt = (doc: ChordDoc, x: number, y: number, w: number, h: number): { id: string; pt: number } | null => {
+    const rad = Math.max(9, w * 0.025);
+    for (let i = (doc.regions?.length ?? 0) - 1; i >= 0; i--) {
+      const r = doc.regions![i];
+      const p = regionPtAt(r, x, y, w, h, rad);
+      if (p >= 0) return { id: r.id, pt: p };
+    }
+    for (let i = (doc.regions?.length ?? 0) - 1; i >= 0; i--) {
+      const r = doc.regions![i];
+      if (pointInRegion(r, x, y, w, h)) return { id: r.id, pt: -1 };
+    }
+    return null;
+  };
+
+  /** Apply a normalized (0..1) transform to one region's points, live state. */
+  const mutateRegionPts = (cid: string, rid: string, fn: (pts: { x: number; y: number }[]) => { x: number; y: number }[]) => {
+    setPagesNoHist(list => list.map(p => {
+      const ci = p.chords.findIndex(c => c.id === cid);
+      if (ci < 0) return p;
+      const ri = (p.chords[ci].regions ?? []).findIndex(r => r.id === rid);
+      if (ri < 0) return p;
+      const next = [...list];
+      const np = structuredClone(p);
+      const pts = fn(np.chords[ci].regions![ri].pts);
+      np.chords[ci].regions![ri] = { ...np.chords[ci].regions![ri], pts };
+      next[p.indexOf(p)] = np;
+      return next;
+    }));
+  };
+  const setPagesNoHist = (fn: (list: PageDoc[]) => PageDoc[]) => setPages(list => fn(structuredClone(list)));
+
+  /** SVG overlay painted on top of the EDITOR board only (never exported):
+   *  dashed outline + draggable control handles for the SELECTED region. */
+  function regionOverlayMarkup(): string {
+    if (!sel || sel.kind !== 'region' || !selectedId || !page) return '';
+    const doc = page.chords.find(c => c.id === selectedId);
+    const r = doc?.regions?.find(x => x.id === sel.id);
+    if (!doc || !r) return '';
+    const es = applyGlobalBoardScale(mergeChordSettings(settings, doc.settings), settings);
+    const { w, h } = canvasSize(es);
+    const rad = Math.max(4.5, w * 0.012);
+    const out: string[] = [];
+    out.push(`<path d="${regionCanvasPath(r, w, h)}" fill="none" stroke="#2f81f7" stroke-width="1.4" stroke-dasharray="5 4" pointer-events="none"/>`);
+    r.pts.forEach((p, i) => {
+      out.push(`<circle cx="${(p.x * w).toFixed(1)}" cy="${(p.y * h).toFixed(1)}" r="${rad.toFixed(1)}" fill="#ffffff" stroke="#2f81f7" stroke-width="1.6"/>`);
+      out.push(`<circle cx="${(p.x * w).toFixed(1)}" cy="${(p.y * h).toFixed(1)}" r="${(rad * 0.35).toFixed(1)}" fill="#2f81f7" stroke="none"/>`);
+      void i;
+    });
+    return out.join('');
+  }
+
+  /** Start dragging a region control point / whole region. */
+  const beginRegionDrag = (cid: string, hit: { id: string; pt: number }, local: { x: number; y: number }, mode: 'pt' | 'move' | 'draw'): boolean => {
+    const ctx = regionCtx(cid);
+    if (!ctx) return false;
+    const r = (ctx.doc.regions ?? []).find(x => x.id === hit.id);
+    if (!r) return false;
+    pushHistory();                            // ONE snapshot per gesture
+    histPausedRef.current = true;             // moves coalesce into that snapshot
+    regionDragRef.current = { id: hit.id, mode, pt: hit.pt, sx: local.x / ctx.w, sy: local.y / ctx.h, orig: r.pts.map(p => ({ ...p })) };
+    draggingRef.current = true;
+    setSel({ kind: 'region', id: hit.id });
+    return true;
+  };
+
+  /** Create a brand-new region at `local` (canvas px) of chord `cid`, seeded
+   *  with two points; more get appended while the pointer drags ('draw'). */
+  const createRegionAt = (cid: string, local: { x: number; y: number }): boolean => {
+    const ctx = regionCtx(cid);
+    if (!ctx) return false;
+    const nx = Math.max(-0.2, Math.min(1.2, local.x / ctx.w));
+    const ny = Math.max(-0.2, Math.min(1.2, local.y / ctx.h));
+    const r: Region = {
+      id: uid('region'),
+      pts: [{ x: nx, y: ny }, { x: Math.min(1.2, nx + 0.012), y: ny }],
+      color: defaultRegionColor(),
+      borderColor: defaultRegionBorder(),
+      borderWidth: 2,
+    };
+    mutateOn(cid, d => { (d.regions ??= []).push(r); return d; });
+    setSel({ kind: 'region', id: r.id });
+    pushHistory();
+    histPausedRef.current = true;
+    regionDragRef.current = { id: r.id, mode: 'draw', pt: -1, sx: nx, sy: ny, orig: [] };
+    draggingRef.current = true;
+    return true;
+  };
+
+  /** Move/reshape the active region during a mousemove (`local` = canvas px). */
+  const applyRegionDrag = (cid: string, local: { x: number; y: number }): boolean => {
+    const rd = regionDragRef.current;
+    if (!rd) return false;
+    const ctx = regionCtx(cid);
+    if (!ctx) return true;
+    const nx = local.x / ctx.w, ny = local.y / ctx.h;
+    if (!Number.isFinite(nx) || !Number.isFinite(ny)) return true;
+    if (rd.mode === 'pt' && rd.pt >= 0) {
+      const cx = Math.max(-0.2, Math.min(1.2, nx)), cy = Math.max(-0.2, Math.min(1.2, ny));
+      mutateRegionPts(cid, rd.id, pts => pts.map((p, i) => (i === rd.pt ? { x: cx, y: cy } : p)));
+    } else if (rd.mode === 'move') {
+      const dx = nx - rd.sx, dy = ny - rd.sy;
+      mutateRegionPts(cid, rd.id, () => rd.orig.map(p => ({
+        x: Math.max(-0.2, Math.min(1.2, p.x + dx)),
+        y: Math.max(-0.2, Math.min(1.2, p.y + dy)),
+      })));
+    } else { // 'draw' — append a vertex when the pointer travelled far enough
+      const lastX = rd.orig.length ? rd.orig[rd.orig.length - 1].x : rd.sx;
+      const lastY = rd.orig.length ? rd.orig[rd.orig.length - 1].y : rd.sy;
+      const step = 0.035;
+      if (Math.hypot(nx - lastX, ny - lastY) > step) {
+        rd.orig.push({ x: nx, y: ny });
+        const snap = rd.orig.map(p => ({ ...p }));
+        mutateRegionPts(cid, rd.id, old => [...old, { x: nx, y: ny }]).valueOf();
+        void snap;
+      }
+    }
+    return true;
+  };
+
+  /** Finish the region gesture. A drawn lasso needs ≥3 points to close into a
+   *  loop — a stub (a click without movement) becomes a small round blob at
+   *  the click point so a single tap still creates a usable region. */
+  const endRegionDrag = (cid?: string): boolean => {
+    const rd = regionDragRef.current;
+    if (!rd) return false;
+    const id = cid ?? selectedId;
+    if (rd.mode === 'draw' && id) {
+      const ctx = regionCtx(id);
+      const r = ctx?.doc.regions?.find(x => x.id === rd.id);
+      if (ctx && r && r.pts.length < 3) {
+        const p0 = r.pts[0];
+        // radius in normalized units ≈ 6% of canvas width (x) / matching y
+        const rx = Math.min(0.12, 0.06), ry = rx * (ctx.w / Math.max(1, ctx.h));
+        const blob = [0, 60, 120, 180, 240, 300].map(deg => {
+          const a = (deg * Math.PI) / 180;
+          return { x: p0.x + rx * Math.cos(a), y: p0.y + ry * Math.sin(a) };
+        });
+        mutateOn(id, d => {
+          d.regions = (d.regions ?? []).map(x => (x.id === rd.id ? { ...x, pts: blob } : x));
+          return d;
+        });
+      }
+    }
+    regionDragRef.current = null;
+    draggingRef.current = false;
+    histPausedRef.current = false;
+    return true;
+  };
+
+  /** Abort any live region gesture without further mutation (safety net). */
+  const cancelRegionDrag = () => {
+    if (!regionDragRef.current) return;
+    regionDragRef.current = null;
+    draggingRef.current = false;
+    histPausedRef.current = false;
+  };
+
+  /** Delete a region (history-aware). */
+  const deleteRegion = (cid: string, rid: string) => {
+    mutateOn(cid, d => { d.regions = (d.regions ?? []).filter(x => x.id !== rid); return d; });
+    setSel(null);
+    flash('Region deleted (Ctrl+Z to undo)');
+  };
+
+  /** Set the fill or border color of the currently selected region. The
+   *  BORDER is always rendered fully opaque (alpha forced to 1) so the edge
+   *  reads distinctly from the translucent wash inside. */
+  const setRegionColor = (target: 'fill' | 'border', c: ChordColor) => {
+    if (!sel || sel.kind !== 'region' || !selectedId) return;
+    mutateOn(selectedId, d => {
+      d.regions = (d.regions ?? []).map(r => r.id === sel.id
+        ? target === 'fill'
+          ? { ...r, color: c }
+          : { ...r, borderColor: { hex: c.hex, alpha: 1 } }
+        : r);
+      return d;
+    });
+  };
 
   // Render EVERY page once (chord thumbnails included) — used for the on-screen
   // stack and reused by export/print so all pages stay identical.
@@ -1178,7 +1380,7 @@ export default function App() {
 
   // ---------- click on the selected chord board (external editor) ----------
   const onBoardClick = (e: React.MouseEvent) => {
-    if (!entry || draggingRef.current || pageDrag) return;
+    if (!entry || draggingRef.current || pageDrag || regionDragRef.current) return;
     e.stopPropagation();
     const local = toEditorBoardCoords(e.clientX, e.clientY);
     if (!local) return;                       // board not measurable — never act on (0,0)
@@ -1265,7 +1467,18 @@ export default function App() {
       const dist = Math.hypot(p.x - x, p.y - y);
       if (dist < best.d) best = { d: dist, sel: { kind: 'fing', id: f.id } };
     }
+    // REGIONS: control points grab at a generous radius; the smoothed FILL is
+    // only selectable when nothing else was hit (dots/text always win).
+    const rg = pickRegionAt(ctx.doc, x, y, ctx.w, ctx.h);
+    if (rg && !best.sel) return { kind: 'region', id: rg.id };
     return best.sel;
+  };
+
+  /** Region under a point in chord `id`'s canvas space (points first, then fill). */
+  const regionHitAt = (id: string, x: number, y: number): { id: string; pt: number } | null => {
+    const ctx = textDragCtx(id);
+    if (!ctx) return null;
+    return pickRegionAt(ctx.doc, x, y, ctx.w, ctx.h);
   };
 
   /** Grab an existing dot or text box of chord `id` for dragging. `local` is in

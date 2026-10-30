@@ -215,6 +215,76 @@ export function renderSvg(doc: ChordDoc, settings: Settings, opts: RenderOpts & 
 
 function withA(c: ChordColor, a: number): ChordColor { return { hex: c.hex, alpha: c.alpha * a }; }
 
+// ---------------- closed spline regions ("lassos") ----------------
+
+/** Closed Catmull-Rom spline through the given points, emitted as cubic
+ *  Bézier segments (uniform parameterization, tension 1/6). Returns an SVG
+ *  path body WITHOUT the leading M — callers prepend their own mapping. */
+export function catmullRomClosedPath(pts: { x: number; y: number }[]): string {
+  const n = pts.length;
+  if (n < 2) return '';
+  if (n === 2) {
+    // degenerate "region": a visible line back and forth
+    return `L ${pts[1].x.toFixed(1)} ${pts[1].y.toFixed(1)} L ${pts[0].x.toFixed(1)} ${pts[0].y.toFixed(1)} Z`;
+  }
+  let d = '';
+  for (let i = 0; i < n; i++) {
+    const p0 = pts[(i - 1 + n) % n], p1 = pts[i], p2 = pts[(i + 1) % n], p3 = pts[(i + 2) % n];
+    const c1 = { x: p1.x + (p2.x - p0.x) / 6, y: p1.y + (p2.y - p0.y) / 6 };
+    const c2 = { x: p2.x - (p3.x - p1.x) / 6, y: p2.y - (p3.y - p1.y) / 6 };
+    d += `C ${c1.x.toFixed(1)} ${c1.y.toFixed(1)}, ${c2.x.toFixed(1)} ${c2.y.toFixed(1)}, ${p2.x.toFixed(1)} ${p2.y.toFixed(1)} `;
+  }
+  return d.trim() + ' Z';
+}
+
+/** The smooth closed outline of a region in CANVAS pixels. */
+export function regionCanvasPath(r: Region, w: number, h: number): string {
+  if (!r.pts.length) return '';
+  const px = r.pts.map(p => ({ x: p.x * w, y: p.y * h }));
+  return `M ${px[0].x.toFixed(1)} ${px[0].y.toFixed(1)} ` + catmullRomClosedPath(px);
+}
+
+/** Point-in-region test against the smoothed spline boundary (even-odd ray
+ *  casting over densely sampled curve points). Used for grab hit-testing so
+ *  clicking the visual fill — not just the raw control polygon — moves it. */
+export function pointInRegion(r: Region, x: number, y: number, w: number, h: number): boolean {
+  const n = r.pts.length;
+  if (n < 3) return false;
+  const poly: { x: number; y: number }[] = [];
+  for (let i = 0; i < n; i++) {
+    const p0 = r.pts[(i - 1 + n) % n], p1 = r.pts[i], p2 = r.pts[(i + 1) % n], p3 = r.pts[(i + 2) % n];
+    for (let k = 0; k < 14; k++) {
+      const t = k / 14, t2 = t * t, t3 = t2 * t;
+      poly.push({
+        x: (w * ((2 * p1.x + (-p0.x + p2.x) * t + (2 * p0.x - 5 * p1.x + 4 * p2.x - p3.x) * t2 + (-p0.x + 3 * p1.x - 3 * p2.x + p3.x) * t3)) / 6),
+        y: (h * ((2 * p1.y + (-p0.y + p2.y) * t + (2 * p0.y - 5 * p1.y + 4 * p2.y - p3.y) * t2 + (-p0.y + 3 * p1.y - 3 * p2.y + p3.y) * t3)) / 6),
+      });
+    }
+  }
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const xi = poly[i].x, yi = poly[i].y, xj = poly[j].x, yj = poly[j].y;
+    if (((yi > y) !== (yj > y)) && (x < ((xj - xi) * (y - yi)) / (yj - yi) + xi)) inside = !inside;
+  }
+  return inside;
+}
+
+/** Paint one region: semi-transparent beige-ish fill, FULLY OPAQUE boundary
+ *  stroke (alpha forced to 1 so the edge always reads distinctly from the
+ *  wash inside). */
+export function regionSvgMarkup(r: Region, w: number, h: number): string {
+  const d = regionCanvasPath(r, w, h);
+  if (!d) return '';
+  const fill = col(r.color);
+  const border = col({ hex: r.borderColor.hex, alpha: 1 });   // ← 0 transparency
+  const bw = Math.max(0.8, r.borderWidth || 2);
+  return `<path d="${d}" fill="${fill}" stroke="${border}" stroke-width="${bw.toFixed(2)}" stroke-linejoin="round"/>`;
+}
+
+function renderRegions(regions: Region[], w: number, h: number): string {
+  return regions.map(r => regionSvgMarkup(r, w, h)).join('\n');
+}
+
 /** The wooden fretboard panel: an isosceles trapezoid whose side edges follow the taper. */
 function renderBoardPanel(
   s: Settings, flen: number, pad: number,
