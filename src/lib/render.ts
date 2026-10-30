@@ -148,7 +148,7 @@ export function renderSvg(doc: ChordDoc, settings: Settings, opts: RenderOpts & 
   // ----- closed spline REGIONS (lassos) — drawn HERE: above the fretboard
   //       panel / frets / strings / inlays, but BEFORE the dots & text below,
   //       so notes always sit on top of their circle. -----
-  if (doc.regions?.length) parts.push(renderRegions(doc.regions, w, h));
+  if (doc.regions?.length) parts.push(renderRegions(doc.regions, w, h, s.regionSmoothing));
 
   // ----- O / X markers in the floating zone before the first fret line — only when
   //       the nut is actually shown there (startFret === 1). Higher starting frets
@@ -218,46 +218,54 @@ function withA(c: ChordColor, a: number): ChordColor { return { hex: c.hex, alph
 // ---------------- closed spline regions ("lassos") ----------------
 
 /** Closed Catmull-Rom spline through the given points, emitted as cubic
- *  Bézier segments (uniform parameterization, tension 1/6). Returns an SVG
+ *  Bézier segments (uniform parameterization). `tension` scales the handle
+ *  length: the classic spline is tension = 1/6; we expose a user-friendly
+ *  0..1 "smoothing" factor mapped to tension = value / 4.5 (so 0.6 ≈ the
+ *  classic look, 1 ⇒ very round, 0 ⇒ straight polyline). Returns an SVG
  *  path body WITHOUT the leading M — callers prepend their own mapping. */
-export function catmullRomClosedPath(pts: { x: number; y: number }[]): string {
+export function catmullRomClosedPath(pts: { x: number; y: number }[], smoothing = 0.6): string {
   const n = pts.length;
   if (n < 2) return '';
   if (n === 2) {
     // degenerate "region": a visible line back and forth
     return `L ${pts[1].x.toFixed(1)} ${pts[1].y.toFixed(1)} L ${pts[0].x.toFixed(1)} ${pts[0].y.toFixed(1)} Z`;
   }
+  const k = Math.max(0, Math.min(1, smoothing)) / 4.5;   // handle-length factor
   let d = '';
   for (let i = 0; i < n; i++) {
     const p0 = pts[(i - 1 + n) % n], p1 = pts[i], p2 = pts[(i + 1) % n], p3 = pts[(i + 2) % n];
-    const c1 = { x: p1.x + (p2.x - p0.x) / 6, y: p1.y + (p2.y - p0.y) / 6 };
-    const c2 = { x: p2.x - (p3.x - p1.x) / 6, y: p2.y - (p3.y - p1.y) / 6 };
+    const c1 = { x: p1.x + (p2.x - p0.x) * k, y: p1.y + (p2.y - p0.y) * k };
+    const c2 = { x: p2.x - (p3.x - p1.x) * k, y: p2.y - (p3.y - p1.y) * k };
     d += `C ${c1.x.toFixed(1)} ${c1.y.toFixed(1)}, ${c2.x.toFixed(1)} ${c2.y.toFixed(1)}, ${p2.x.toFixed(1)} ${p2.y.toFixed(1)} `;
   }
   return d.trim() + ' Z';
 }
 
-/** The smooth closed outline of a region in CANVAS pixels. */
-export function regionCanvasPath(r: Region, w: number, h: number): string {
+/** The smooth closed outline of a region in CANVAS pixels. Uses the region's
+ *  own stored smoothing when present, otherwise the passed global default. */
+export function regionCanvasPath(r: Region, w: number, h: number, defaultSmoothing = 0.6): string {
   if (!r.pts.length) return '';
   const px = r.pts.map(p => ({ x: p.x * w, y: p.y * h }));
-  return `M ${px[0].x.toFixed(1)} ${px[0].y.toFixed(1)} ` + catmullRomClosedPath(px);
+  return `M ${px[0].x.toFixed(1)} ${px[0].y.toFixed(1)} ` + catmullRomClosedPath(px, r.smoothing ?? defaultSmoothing);
 }
 
 /** Point-in-region test against the smoothed spline boundary (even-odd ray
  *  casting over densely sampled curve points). Used for grab hit-testing so
  *  clicking the visual fill — not just the raw control polygon — moves it. */
-export function pointInRegion(r: Region, x: number, y: number, w: number, h: number): boolean {
+export function pointInRegion(r: Region, x: number, y: number, w: number, h: number, defaultSmoothing = 0.6): boolean {
   const n = r.pts.length;
   if (n < 3) return false;
+  const k = Math.max(0, Math.min(1, r.smoothing ?? defaultSmoothing)) / 4.5; // tension factor
   const poly: { x: number; y: number }[] = [];
   for (let i = 0; i < n; i++) {
     const p0 = r.pts[(i - 1 + n) % n], p1 = r.pts[i], p2 = r.pts[(i + 1) % n], p3 = r.pts[(i + 2) % n];
-    for (let k = 0; k < 14; k++) {
-      const t = k / 14, t2 = t * t, t3 = t2 * t;
+    for (let si = 0; si <= 28; si++) {
+      const t = si / 28, t2 = t * t, t3 = t2 * t;
+      // Hermite with scaled tangents: T1 = k*(p2-p0), T2 = k*(p3-p1)
+      const h00 = 2 * t3 - 3 * t2 + 1, h10 = t3 - 2 * t2 + t, h01 = -2 * t3 + 3 * t2, h11 = t3 - t2;
       poly.push({
-        x: (w * ((2 * p1.x + (-p0.x + p2.x) * t + (2 * p0.x - 5 * p1.x + 4 * p2.x - p3.x) * t2 + (-p0.x + 3 * p1.x - 3 * p2.x + p3.x) * t3)) / 6),
-        y: (h * ((2 * p1.y + (-p0.y + p2.y) * t + (2 * p0.y - 5 * p1.y + 4 * p2.y - p3.y) * t2 + (-p0.y + 3 * p1.y - 3 * p2.y + p3.y) * t3)) / 6),
+        x: w * (h00 * p1.x + h10 * k * (p2.x - p0.x) + h01 * p2.x + h11 * k * (p3.x - p1.x)),
+        y: h * (h00 * p1.y + h10 * k * (p2.y - p0.y) + h01 * p2.y + h11 * k * (p3.y - p1.y)),
       });
     }
   }
@@ -271,9 +279,10 @@ export function pointInRegion(r: Region, x: number, y: number, w: number, h: num
 
 /** Paint one region: semi-transparent beige-ish fill, FULLY OPAQUE boundary
  *  stroke (alpha forced to 1 so the edge always reads distinctly from the
- *  wash inside). */
-export function regionSvgMarkup(r: Region, w: number, h: number): string {
-  const d = regionCanvasPath(r, w, h);
+ *  wash inside). `defaultSmoothing` is the global tension used when the
+ *  region carries no per-region value. */
+export function regionSvgMarkup(r: Region, w: number, h: number, defaultSmoothing = 0.6): string {
+  const d = regionCanvasPath(r, w, h, defaultSmoothing);
   if (!d) return '';
   const fill = col(r.color);
   const border = col({ hex: r.borderColor.hex, alpha: 1 });   // ← 0 transparency
@@ -281,8 +290,8 @@ export function regionSvgMarkup(r: Region, w: number, h: number): string {
   return `<path d="${d}" fill="${fill}" stroke="${border}" stroke-width="${bw.toFixed(2)}" stroke-linejoin="round"/>`;
 }
 
-function renderRegions(regions: Region[], w: number, h: number): string {
-  return regions.map(r => regionSvgMarkup(r, w, h)).join('\n');
+function renderRegions(regions: Region[], w: number, h: number, defaultSmoothing = 0.6): string {
+  return regions.map(r => regionSvgMarkup(r, w, h, defaultSmoothing)).join('\n');
 }
 
 /** The wooden fretboard panel: an isosceles trapezoid whose side edges follow the taper. */
