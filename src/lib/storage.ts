@@ -94,7 +94,7 @@ export const DEFAULT_SETTINGS: Settings = {
 };
 
 export function emptyChord(name = 'Untitled'): ChordDoc {
-  return { id: uid('chord'), name, dots: [], texts: [], fingerings: [] };
+  return { id: uid('chord'), name, dots: [], texts: [], fingerings: [], regions: [] };
 }
 
 // ---------- page (multi-chord canvas) model ----------
@@ -217,6 +217,7 @@ export function normalizeChord(c: Partial<ChordDoc> & Record<string, unknown>): 
     dots: Array.isArray(c.dots) ? c.dots : [],
     texts: Array.isArray(c.texts) ? c.texts : [],
     fingerings: Array.isArray(c.fingerings) ? c.fingerings : [],
+    regions: Array.isArray(c.regions) ? (c.regions as ChordDoc['regions']) : [],
     settings: (c.settings && typeof c.settings === 'object') ? c.settings as Partial<Settings> : undefined,
   };
   if (out.settings) {

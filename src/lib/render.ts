@@ -5,7 +5,7 @@
 // "nut-first" frame shared with hit-testing, so orientation changes, flips and
 // scaling are equivariant — dots, nut, taper and spacing stay consistent.
 
-import type { ChordColor, ChordDoc, Dot, Settings } from './types';
+import type { ChordColor, ChordDoc, Dot, Region, Settings } from './types';
 import { col, uid } from './types';
 import { isHiddenRel, nutShown } from './types';
 import { pitchAtRel, midiToName, computeDotLabel, TUNING_HIGH_TO_LOW } from './music';
@@ -144,6 +144,11 @@ export function renderSvg(doc: ChordDoc, settings: Settings, opts: RenderOpts & 
       parts.push(`<text x="${p.x.toFixed(1)}" y="${p.y.toFixed(1)}" font-family="${esc(s.defaultTextFont)}" font-size="11" fill="${col(withA(s.fretColor, 0.7))}" text-anchor="middle" dominant-baseline="central">${esc(name)}</text>`);
     }
   }
+
+  // ----- closed spline REGIONS (lassos) — drawn HERE: above the fretboard
+  //       panel / frets / strings / inlays, but BEFORE the dots & text below,
+  //       so notes always sit on top of their circle. -----
+  if (doc.regions?.length) parts.push(renderRegions(doc.regions, w, h));
 
   // ----- O / X markers in the floating zone before the first fret line — only when
   //       the nut is actually shown there (startFret === 1). Higher starting frets
