@@ -860,12 +860,10 @@ export default function App() {
       if (ci < 0) return p;
       const ri = (p.chords[ci].regions ?? []).findIndex(r => r.id === rid);
       if (ri < 0) return p;
-      const next = [...list];
       const np = structuredClone(p);
       const pts = fn(np.chords[ci].regions![ri].pts);
       np.chords[ci].regions![ri] = { ...np.chords[ci].regions![ri], pts };
-      next[p.indexOf(p)] = np;
-      return next;
+      return np;
     }));
   };
   const setPagesNoHist = (fn: (list: PageDoc[]) => PageDoc[]) => setPages(list => fn(structuredClone(list)));
@@ -950,9 +948,7 @@ export default function App() {
       const step = 0.035;
       if (Math.hypot(nx - lastX, ny - lastY) > step) {
         rd.orig.push({ x: nx, y: ny });
-        const snap = rd.orig.map(p => ({ ...p }));
-        mutateRegionPts(cid, rd.id, old => [...old, { x: nx, y: ny }]).valueOf();
-        void snap;
+        mutateRegionPts(cid, rd.id, old => [...old, { x: nx, y: ny }]);
       }
     }
     return true;
@@ -3036,7 +3032,7 @@ export default function App() {
         />
       )}
 
-      {editing && editItem && (
+      {editing && editing.kind !== 'region' && editItem && (
         <ItemDialog
           kind={editing.kind}
           item={editItem}
