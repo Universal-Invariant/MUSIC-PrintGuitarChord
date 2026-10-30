@@ -7,7 +7,7 @@ import {
   mergeChordSettings, orderByZ, pageSizePx, placementsOverlap, resolveCollision, snapVal, stripGlobalKeysFromChordDocs,
   syncKeysToAllChords, uid, defaultRegionBorder, defaultRegionColor,
 } from './lib/types';
-import { composePage, cycleColorIndices, cycleShapeIndices, makeDot, pointInRegion, regionCanvasPath, renderSvg, svgInner } from './lib/render';
+import { composePage, cycleColorIndices, cycleShapeIndices, makeDot, pointInRegion, regionCanvasPath, regionSvgMarkup, renderSvg, svgInner } from './lib/render';
 import {
   NUM_STRINGS, canvasSize, cellCenter, dotAlongFret, fingeringPos, fretPositions, hitTest,
   lengthScale, nutZoneDepth, project, stringLayout, unproject, widthScale,
@@ -274,6 +274,18 @@ export default function App() {
    *  translates the whole lasso, 'draw' appends points while dragging a NEW
    *  region with the Region tool. All coords are normalized (0..1) deltas. */
   const regionDragRef = useRef<{ cid: string; id: string; mode: 'pt' | 'move' | 'draw'; pt: number; sx: number; sy: number; orig: { x: number; y: number }[] } | null>(null);
+  /** POINT-BY-POINT region creation: active while Ctrl+Shift is HELD. Each
+   *  press adds one control point to the same curve (the trailing stub point
+   *  is replaced every time, so the list stays clean). Releasing Ctrl or
+   *  Shift closes the curve smoothly and pops the style dialog. */
+  const regionCreateRef = useRef<{ cid: string; id: string } | null>(null);
+  /** Style dialog for a just-closed region (color/alpha/border/smoothing). */
+  const [regionStyleFor, setRegionStyleFor] = useState<{ cid: string; id: string } | null>(null);
+  /** True while CTRL (or Cmd) is physically held — tracked from real key
+   *  events because mouseup/mousedown report modifiers unreliably (e.g. the
+   *  user releases Ctrl a beat before the button). */
+  const ctrlHeldRef = useRef(false);
+  const [ctrlHeldUi, setCtrlHeldUi] = useState(false);
   const [regionColorTarget, setRegionColorTarget] = useState<'fill' | 'border'>('fill');
   const pageDragRef = useRef<{ id: string; sx: number; sy: number; ox: number; oy: number } | null>(null);
   const boardWrapRef = useRef<HTMLDivElement>(null);
@@ -884,7 +896,9 @@ export default function App() {
   const setPagesNoHist = (fn: (list: PageDoc[]) => PageDoc[]) => setPages(list => fn(structuredClone(list)));
 
   /** SVG overlay painted on top of the EDITOR board only (never exported):
-   *  dashed outline + draggable control handles for the SELECTED region. */
+   *  dashed outline + draggable control handles for the SELECTED region. An
+   *  OPEN Ctrl+Shift creation curve is highlighted in amber with an "open"
+   *  tag so it's obvious the shape isn't closed until the keys are released. */
   function regionOverlayMarkup(): string {
     if (!sel || sel.kind !== 'region' || !selectedId || !page) return '';
     const doc = page.chords.find(c => c.id === selectedId);
@@ -893,13 +907,25 @@ export default function App() {
     const es = applyGlobalBoardScale(mergeChordSettings(settings, doc.settings), settings);
     const { w, h } = canvasSize(es);
     const rad = Math.max(4.5, w * 0.012);
+    const open = !!regionCreateRef.current && regionCreateRef.current.id === r.id;
+    const col = open ? '#e8a13c' : '#2f81f7';
     const out: string[] = [];
-    out.push(`<path d="${regionCanvasPath(r, w, h)}" fill="none" stroke="#2f81f7" stroke-width="1.4" stroke-dasharray="5 4" pointer-events="none"/>`);
+    out.push(`<path d="${regionCanvasPath(r, w, h)}" fill="none" stroke="${col}" stroke-width="1.4" stroke-dasharray="5 4" pointer-events="none"/>`);
     r.pts.forEach((p, i) => {
-      out.push(`<circle cx="${(p.x * w).toFixed(1)}" cy="${(p.y * h).toFixed(1)}" r="${rad.toFixed(1)}" fill="#ffffff" stroke="#2f81f7" stroke-width="1.6"/>`);
-      out.push(`<circle cx="${(p.x * w).toFixed(1)}" cy="${(p.y * h).toFixed(1)}" r="${(rad * 0.35).toFixed(1)}" fill="#2f81f7" stroke="none"/>`);
+      out.push(`<circle cx="${(p.x * w).toFixed(1)}" cy="${(p.y * h).toFixed(1)}" r="${rad.toFixed(1)}" fill="#ffffff" stroke="${col}" stroke-width="1.6"/>`);
+      out.push(`<circle cx="${(p.x * w).toFixed(1)}" cy="${(p.y * h).toFixed(1)}" r="${(rad * 0.35).toFixed(1)}" fill="${col}" stroke="none"/>`);
       void i;
     });
+    if (open) {
+      const p0 = r.pts[0] ?? { x: 0, y: 0 };
+      out.push(`<text x="${(p0.x * w + rad + 4).toFixed(1)}" y="${(p0.y * h - rad - 4).toFixed(1)}" font-size="${Math.max(10, w * 0.028).toFixed(1)}" fill="${col}" font-family="sans-serif">● open — keep Ctrl+Shift &amp; click to add points; release keys to close</text>`);
+    }
+    // While a creation curve is OPEN, also draw the committed region's own
+    // spline markup on top of the handles — the base render only paints
+    // regions for the EDITOR's merged doc when it matches, and this keeps the
+    // live preview (fill wash + opaque border) visible during point-by-point
+    // drawing regardless of which path produced the board markup.
+    if (open) out.unshift(regionSvgMarkup(r, w, h));
     // Small hollow diamonds at each segment MIDPOINT: pressing one inserts a
     // new control point there (see 'insert' branch of tryRegionGestureDown).
     const n = r.pts.length;
@@ -1049,6 +1075,14 @@ export default function App() {
     });
   };
 
+  /** Apply the style dialog's result to a region (history-aware, one step). */
+  const applyRegionStyle = (cid: string, rid: string, patch: Partial<Pick<Region, 'color' | 'borderColor' | 'smoothing'>>) => {
+    mutateOn(cid, d => {
+      d.regions = (d.regions ?? []).map(r => r.id === rid ? { ...r, ...patch } : r);
+      return d;
+    });
+  };
+
   // ---------- REGION GESTURE BRIDGE ----------
   // The region editing primitives above (createRegionAt / beginRegionDrag /
   // applyRegionDrag / endRegionDrag) are declared BEFORE the pointer handlers
@@ -1100,10 +1134,12 @@ export default function App() {
   };
 
   /** Start drawing a brand-new closed region at a point in chord `cid`'s
-   *  canvas space. Seeds the lasso with two points; more are appended while
-   *  the pointer drags, and a click-without-drag closes into a round blob.
-   *  Invoked from BOTH surfaces: Ctrl+Shift+click anywhere on a chord, or a
-   *  plain press while the Region tool (key 5) is active. */
+   *  canvas space — POINT-BY-POINT mode (Ctrl+Shift held): the first press
+   *  seeds the curve with one control point plus a tiny "stub" twin that
+   *  keeps the live spline preview visible; every further press REPLACES the
+   *  stub with the new point and grows a fresh stub. Releasing Ctrl or Shift
+   *  (or Enter) calls finishRegionCreate, which drops the stub, closes the
+   *  Catmull-Rom loop smoothly and pops the style dialog. */
   const startRegionCreate = (cid: string, local: { x: number; y: number }): boolean => {
     const ctx = regionChordView(cid);
     if (!ctx) return false;
@@ -1118,19 +1154,69 @@ export default function App() {
       borderColor: defaultRegionBorder(),
       borderWidth: 2,
     };
-    lr.pushHistory();                          // ONE snapshot per gesture
+    lr.pushHistory();                          // ONE snapshot per creation gesture
     mutateOn(cid, d => { (d.regions ??= []).push(r); return d; });
     lr.setSel({ kind: 'region', id: r.id });
-    histPausedRef.current = true;              // moves coalesce into that snapshot
-    regionDragRef.current = { cid, id: r.id, mode: 'draw', pt: -1, sx: nx, sy: ny, orig: [] };
-    draggingRef.current = true;
+    histPausedRef.current = true;              // point adds coalesce into that snapshot
+    regionCreateRef.current = { cid, id: r.id };
+    draggingRef.current = true;                // swallow follow-up clicks until release
+    return true;
+  };
+
+  /** Add one control point to the OPEN (Ctrl+Shift) region being created.
+   *  Returns false when no creation gesture is active. */
+  const addRegionPoint = (cid: string, local: { x: number; y: number }): boolean => {
+    const rc = regionCreateRef.current;
+    if (!rc || rc.cid !== cid) return false;
+    const ctx = regionChordView(cid);
+    if (!ctx) return false;
+    const nx = Math.max(-0.2, Math.min(1.2, local.x / ctx.w));
+    const ny = Math.max(-0.2, Math.min(1.2, local.y / ctx.h));
+    if (!Number.isFinite(nx) || !Number.isFinite(ny)) return false;
+    mutateRegionPts(cid, rc.id, pts => {
+      const keep = pts.slice(0, Math.max(1, pts.length - 1));   // drop the trailing stub
+      return [...keep, { x: nx, y: ny }, { x: Math.min(1.2, nx + 0.012), y: ny }];
+    });
+    return true;
+  };
+
+  /** Close the open creation curve: remove the stub, round it out with the
+   *  global smoothing default (so the dialog's slider starts from it), and
+   *  pop the style dialog. A curve with <3 real points becomes a small round
+   *  blob at the last point instead of a degenerate sliver. */
+  const finishRegionCreate = (): boolean => {
+    const rc = regionCreateRef.current;
+    if (!rc) return false;
+    regionCreateRef.current = null;
+    draggingRef.current = false;
+    histPausedRef.current = false;
+    const ctx = regionChordView(rc.cid);
+    const r = ctx?.doc.regions?.find(x => x.id === rc.id);
+    if (!ctx || !r) return true;
+    const clean = r.pts.slice(0, Math.max(0, r.pts.length - 1));  // drop stub
+    let pts = clean;
+    if (clean.length < 3) {
+      const p0 = clean[0] ?? { x: 0.5, y: 0.5 };
+      const rx = 0.06, ry = rx * (ctx.w / Math.max(1, ctx.h));
+      pts = [0, 60, 120, 180, 240, 300].map(deg => {
+        const a = (deg * Math.PI) / 180;
+        return { x: p0.x + rx * Math.cos(a), y: p0.y + ry * Math.sin(a) };
+      });
+    }
+    const sm = Number.isFinite(settings.regionSmoothing) ? settings.regionSmoothing : 0.6;
+    mutateOn(rc.cid, d => {
+      d.regions = (d.regions ?? []).map(x => x.id === rc.id ? { ...x, pts, smoothing: sm } : x);
+      return d;
+    });
+    setRegionStyleFor({ cid: rc.cid, id: rc.id });   // color / alpha / border / smoothing
     return true;
   };
 
   /** Press-time dispatch for ALL region gestures on either surface, in grab
    *  priority order: (1) control point of the SELECTED region → reshape,
-   *  (2) Ctrl+Shift combo or the Region tool on empty space → CREATE a new
-   *  region, (3) a region fill → move it whole. Returns true when the event
+   *  (2) an OPEN Ctrl+Shift creation → ADD another point to the same curve,
+   *  (3) Ctrl+Shift combo or the Region tool on empty space → CREATE a new
+   *  region, (4) a region fill → move it whole. Returns true when the event
    *  was consumed by a region gesture. */
   const tryRegionGestureDown = (cid: string, local: { x: number; y: number }, e: { ctrlKey: boolean; metaKey: boolean; shiftKey: boolean }): boolean => {
     const lr = liveRef.current;
@@ -1138,6 +1224,16 @@ export default function App() {
     const ctx = regionChordView(cid);
     if (!ctx) return false;
     const rad = 9;                              // control-point grab radius (px)
+    const wantsCreate = (e.ctrlKey || e.metaKey) && e.shiftKey;
+    // 0) A creation curve is OPEN (Ctrl+Shift held): every press adds a point
+    //    to THAT curve — even if the press lands on a handle/fill. Checked
+    //    before reshaping so rapid clicking can't hijack the new curve.
+    if (regionCreateRef.current && (wantsCreate || ctrlHeldRef.current)) {
+      if (regionCreateRef.current.cid === cid) return addRegionPoint(cid, local);
+      // pressed over a DIFFERENT chord than the open curve's — ignore rather
+      // than mixing coordinate systems; release the keys to close the curve.
+      return true;
+    }
     // 1) Grab a handle of the currently selected region first — reshaping
     //    must win over creating/moving even under Ctrl+Shift.
     if (sel && sel.kind === 'region') {
@@ -1151,30 +1247,44 @@ export default function App() {
         if (m >= 0) return beginRegionDrag(cid, { id: sr.id, pt: m }, local, 'insert');
       }
     }
-    const wantsCreate = (e.ctrlKey || e.metaKey) && e.shiftKey;
     if (wantsCreate || tool === 'region') {
-      // 2) Creation gesture. With the bare Region tool, clicking ON an
-      //    existing region's control point still reshapes instead.
+      // 2/3) Creation gesture. The bare Region tool keeps the classic
+      //      click-drag FREEHAND lasso (mode 'draw'): trace the outline in
+      //      one stroke and release to close it. Ctrl+Shift uses the
+      //      point-by-point mode above. With the Region tool, pressing ON an
+      //      existing region's control point still reshapes instead.
       if (!(wantsCreate && !(tool === 'region'))) {
         const near = lr.pickRegionAt(ctx.doc, local.x, local.y, ctx.w, ctx.h);
         if (near && near.pt >= 0) return beginRegionDrag(cid, near, local, 'pt');
       }
-      return startRegionCreate(cid, local);
+      if (wantsCreate) return startRegionCreate(cid, local);
+      return createRegionAt(cid, local);       // Region-tool freehand lasso
     }
-    // 3) Plain press on a region fill → move the whole lasso (dots/text were
-    //    already given grab priority by the callers before reaching here).
+    // 4) Plain press on a region fill → select + move the whole lasso (dots/
+    //    text were already given grab priority by the callers before here).
     const rg = lr.pickRegionAt(ctx.doc, local.x, local.y, ctx.w, ctx.h);
     if (rg) return beginRegionDrag(cid, { id: rg.id, pt: -1 }, local, 'move');
+    // 5) Plain press inside a chord with NO region under the cursor while the
+    //    Region tool is active → just SELECT nothing / deselect regions so a
+    //    later click on a region works normally.
     return false;
   };
 
   /** Mouseup-side finisher shared by both surfaces: returns true when a live
-   *  region gesture existed and has now been finalized. */
+   *  region gesture existed and has now been finalized. An OPEN Ctrl+Shift
+   *  creation is NOT closed here — releasing the mouse button while the keys
+   *  are still held just ends any point-drag; the curve closes when the keys
+   *  are released (keyup) or Enter is pressed. */
   const finishRegionGestureUp = (): boolean => {
     const rd = regionDragRef.current;
-    if (!rd) return false;
-    endRegionDrag(rd.cid);
-    return true;
+    if (rd) {
+      endRegionDrag(rd.cid);
+      return true;
+    }
+    if (regionCreateRef.current && !ctrlHeldRef.current && !shiftHeldRef.current) {
+      return finishRegionCreate();             // modifiers already gone → close smoothly
+    }
+    return false;
   };
 
   /** Delete whichever item type the current selection describes — regions
@@ -1572,6 +1682,9 @@ export default function App() {
     if ((e.ctrlKey || e.metaKey) && e.shiftKey) { lastClickRef.current = null; return; }
     // Region tool: plain clicks are draw/reshape/move gestures too.
     if (tool === 'region') { lastClickRef.current = null; return; }
+    // A Ctrl+Shift creation curve is still OPEN — swallow every click so it
+    // can never fall through to add-text / toggle-dot paths.
+    if (regionCreateRef.current) { lastClickRef.current = null; return; }
     e.stopPropagation();
     const local = toEditorBoardCoords(e.clientX, e.clientY);
     if (!local) return;                       // board not measurable — never act on (0,0)
@@ -1820,13 +1933,13 @@ export default function App() {
   };
 
   const onBoardPointerDown = (e: React.MouseEvent) => {
-    if (!entry || draggingRef.current) return;
-    // CTRL+SHIFT (+Cmd) + press → START A REGION at the cursor. Checked FIRST
-    // so it wins over the plain Ctrl+press delete gesture below. The combo
-    // works with ANY tool and from BOTH surfaces (this editor board and the
-    // page canvas). It places the first lasso point and enters live draw
-    // mode: keep dragging to trace the outline, or release to get a round
-    // starter blob that can be reshaped via its control handles.
+    if (!entry) return;
+    // CTRL+SHIFT (+Cmd) + press → START / CONTINUE A REGION at the cursor.
+    // Checked FIRST so it wins over the plain Ctrl+press delete gesture below.
+    // The combo works with ANY tool and from BOTH surfaces (this editor board
+    // and the page canvas). While BOTH keys stay held, EVERY press adds a
+    // control point to the SAME open curve (point-by-point lasso). Releasing
+    // either key closes the curve smoothly and opens the style dialog.
     if ((e.ctrlKey || e.metaKey) && e.shiftKey && selectedId) {
       const local = toEditorBoardCoords(e.clientX, e.clientY);
       if (local && tryRegionGestureDown(selectedId, local, e)) { e.preventDefault(); e.stopPropagation(); lastClickRef.current = null; }
@@ -1896,8 +2009,21 @@ export default function App() {
       if (pageDragRef.current) { pageDragRef.current = null; setPageDrag(false); endDragHistory(); }
     };
     const blur = () => up();
-    const kd = (ev: KeyboardEvent) => { if (ev.key === 'Shift') shiftHeldRef.current = true; };
-    const ku = (ev: KeyboardEvent) => { if (ev.key === 'Shift') shiftHeldRef.current = false; };
+    const kd = (ev: KeyboardEvent) => {
+      if (ev.key === 'Shift') shiftHeldRef.current = true;
+      if (ev.key === 'Control' || ev.key === 'Meta') { ctrlHeldRef.current = true; setCtrlHeldUi(true); }
+    };
+    const ku = (ev: KeyboardEvent) => {
+      if (ev.key === 'Shift') shiftHeldRef.current = false;
+      if (ev.key === 'Control' || ev.key === 'Meta') { ctrlHeldRef.current = false; setCtrlHeldUi(false); }
+      // RELEASING CTRL or SHIFT CLOSES the open point-by-point region curve:
+      // the stub is dropped, the Catmull-Rom loop rounds out with the global
+      // smoothing default, and the style dialog pops up. (Also clears the
+      // creation mode even when no curve was ever started.)
+      if ((ev.key === 'Shift' || ev.key === 'Control' || ev.key === 'Meta') && regionCreateRef.current) {
+        finishRegionCreate();
+      }
+    };
     window.addEventListener('mouseup', up);
     window.addEventListener('blur', blur);
     window.addEventListener('keydown', kd);
@@ -2088,6 +2214,17 @@ export default function App() {
   const onChordBoxDown = (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
     if (e.button !== 0) return;               // left button only
+    // A Ctrl+Shift creation curve is OPEN: the next press adds a point to it,
+    // no matter which chord box receives the event first. Route through the
+    // region gesture dispatcher with THIS chord's own coords — tryRegionGestureDown
+    // ignores mismatches safely (returns true without mutating anything).
+    if (regionCreateRef.current && ((e.ctrlKey || e.metaKey) && e.shiftKey)) {
+      selectChord(id);
+      const local = toChordLocalById(id, e.clientX, e.clientY);
+      if (local) tryRegionGestureDown(id, local, e);
+      e.preventDefault(); lastClickRef.current = null;
+      return;
+    }
     // CTRL+SHIFT (+Cmd) + press → START A REGION at the cursor, on EITHER
     // surface. Checked FIRST so it wins over plain Ctrl+press deletes and the
     // whole-box move gesture. Coordinates come from the chord's own live
@@ -2413,6 +2550,19 @@ export default function App() {
       if (e.key === '3') setTool('fing');
       if (e.key === '4') setTool('select');
       if (e.key === '5') setTool('region');
+      // Enter closes an OPEN Ctrl+Shift region curve exactly like releasing
+      // the keys (smooth close + style dialog). Escape aborts it instead.
+      if (e.key === 'Enter' && regionCreateRef.current) { e.preventDefault(); finishRegionCreate(); return; }
+      if (e.key === 'Escape' && regionCreateRef.current) {
+        const rc = regionCreateRef.current;
+        regionCreateRef.current = null;
+        draggingRef.current = false;
+        histPausedRef.current = false;
+        mutateOn(rc.cid, d => { d.regions = (d.regions ?? []).filter(r => r.id !== rc.id); return d; });
+        setSel(null);
+        flash('Region cancelled');
+        return;
+      }
       if (e.key === 'Escape') { setSel(null); setEditing(null); selectChord(null); }
     };
     window.addEventListener('keydown', h);

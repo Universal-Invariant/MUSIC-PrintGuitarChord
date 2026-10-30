@@ -251,6 +251,19 @@ export default function SettingsPanel({ settings, onChange, customs, onCustomsCh
         <button className="btn small" onClick={() => setGlobal({ boardLengthScale: 1, boardWidthScale: 1 })}>⟲ Reset fretboard scale</button>
       </Section>
 
+      <Section title="Regions (lassos)">
+        <div className="mini-note">Closed spline regions drawn around groups of dots. Hold <b>Ctrl+Shift</b> and click to start a curve, keep the keys held and click again to add more points — release the keys (or press Enter) to close it smoothly and pick its colors. The <b>◌ Region</b> tool (key 5) also freehand-draws with click-drag.</div>
+        <SliderRow label={<span>Default smoothing <em style={{ fontWeight: 400, fontSize: 10 }}>(global — new curves)</em></span>} min={0} max={1} step={0.01} fineStep={0.05} finestStep={0.01}
+          value={gOf('regionSmoothing')} format={v => `${Math.round(v * 100)}%`}
+          onChange={v => setGlobal({ regionSmoothing: v })} />
+        <div className="mini-note">Spline tension applied to NEWLY created curves (0 = angular polyline, 1 = maximally round). Each region keeps its own value once set — tweak it later via the style dialog or by selecting the region.</div>
+        <label className="row"><span>New-region fill alpha</span>
+          <input type="range" min={0.05} max={1} step={0.05} value={gs.regionFillAlpha ?? 0.75} onChange={e => setGlobal({ regionFillAlpha: Number(e.target.value) })} /><b style={{ fontSize: 11 }}>{Math.round((gs.regionFillAlpha ?? 0.75) * 100)}%</b></label>
+        <label className="row"><span>Border follows fill color</span>
+          <input type="checkbox" checked={!!gs.regionBorderColorFollows} onChange={e => setGlobal({ regionBorderColorFollows: e.target.checked })} /></label>
+        <div className="mini-note">When ON, a new region's border uses the fill's hue at full opacity (the boundary is always opaque so edges read distinctly from the wash inside).</div>
+      </Section>
+
       <Section title="Nut, taper & fret spacing">
         <div className="mini-note">The nut shows automatically when the starting fret is 1 — higher starting frets sit mid-neck and hide it. Open-string dots float before the first fret line; strings never extend past the starting fret or the last fret.</div>
         <label className="row"><span>Show nut{nutShown(s) ? '' : ' (hidden — start at fret 1 to show)'}</span>
