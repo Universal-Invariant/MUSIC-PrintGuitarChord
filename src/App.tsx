@@ -273,7 +273,7 @@ export default function App() {
   /** Live region gesture: 'pt' drags one control point (reshape), 'move'
    *  translates the whole lasso, 'draw' appends points while dragging a NEW
    *  region with the Region tool. All coords are normalized (0..1) deltas. */
-  const regionDragRef = useRef<{ id: string; mode: 'pt' | 'move' | 'draw'; pt: number; sx: number; sy: number; orig: { x: number; y: number }[] } | null>(null);
+  const regionDragRef = useRef<{ cid: string; id: string; mode: 'pt' | 'move' | 'draw'; pt: number; sx: number; sy: number; orig: { x: number; y: number }[] } | null>(null);
   const [regionColorTarget, setRegionColorTarget] = useState<'fill' | 'border'>('fill');
   const pageDragRef = useRef<{ id: string; sx: number; sy: number; ox: number; oy: number } | null>(null);
   const boardWrapRef = useRef<HTMLDivElement>(null);
@@ -896,7 +896,7 @@ export default function App() {
     if (!r) return false;
     pushHistory();                            // ONE snapshot per gesture
     histPausedRef.current = true;             // moves coalesce into that snapshot
-    regionDragRef.current = { id: hit.id, mode, pt: hit.pt, sx: local.x / ctx.w, sy: local.y / ctx.h, orig: r.pts.map(p => ({ ...p })) };
+    regionDragRef.current = { cid, id: hit.id, mode, pt: hit.pt, sx: local.x / ctx.w, sy: local.y / ctx.h, orig: r.pts.map(p => ({ ...p })) };
     draggingRef.current = true;
     setSel({ kind: 'region', id: hit.id });
     return true;
@@ -920,7 +920,7 @@ export default function App() {
     setSel({ kind: 'region', id: r.id });
     pushHistory();
     histPausedRef.current = true;
-    regionDragRef.current = { id: r.id, mode: 'draw', pt: -1, sx: nx, sy: ny, orig: [] };
+    regionDragRef.current = { cid, id: r.id, mode: 'draw', pt: -1, sx: nx, sy: ny, orig: [] };
     draggingRef.current = true;
     return true;
   };
@@ -1012,6 +1012,137 @@ export default function App() {
         : r);
       return d;
     });
+  };
+
+  // ---------- REGION GESTURE BRIDGE ----------
+  // The region editing primitives above (createRegionAt / beginRegionDrag /
+  // applyRegionDrag / endRegionDrag) are declared BEFORE the pointer handlers
+  // and therefore cannot see `pages` / `pageIdxRef` / `pickRegionAt` from their
+  // own closure scope. These module-level slots hold LIVE references (updated
+  // every render — same discipline as pagesRef/selectedIdRef), and the small
+  // wrappers below resolve them at CALL time, when everything is defined.
+  const liveRef = useRef<{
+    pages: PageDoc[]; pageIdxRef: { current: number };
+    pickRegionAt: typeof pickRegionAt;
+    deleteItemAt: typeof deleteItemAt;
+    pushHistory: () => void;
+    flash: (m: string) => void;
+    setSel: (s: Sel) => void;
+    setEditing: (s: Sel) => void;
+    selectChord: (id: string | null) => void;
+  } | null>(null);
+  liveRef.current = { pages, pageIdxRef, pickRegionAt, deleteItemAt, pushHistory, flash, setSel, setEditing, selectChord };
+
+  /** Committed-state view of one chord + its native canvas size (LIVE page,
+   *  never the render closure). Mirrors textDragCtx's resolution rules. */
+  const regionChordView = (cid: string): { doc: ChordDoc; w: number; h: number } | null => {
+    const lr = liveRef.current;
+    if (!lr) return null;
+    const pg = lr.pages[Math.max(0, Math.min(lr.pages.length - 1, lr.pageIdxRef.current))];
+    const doc = pg?.chords.find(c => c.id === cid);
+    if (!doc) return null;
+    const es = applyGlobalBoardScale(mergeChordSettings(settings, doc.settings), settings);
+    const nat = canvasSize(es);
+    return { doc, w: nat.w, h: nat.h };
+  };
+
+  /** Start drawing a brand-new closed region at a point in chord `cid`'s
+   *  canvas space. Seeds the lasso with two points; more are appended while
+   *  the pointer drags, and a click-without-drag closes into a round blob.
+   *  Invoked from BOTH surfaces: Ctrl+Shift+click anywhere on a chord, or a
+   *  plain press while the Region tool (key 5) is active. */
+  const startRegionCreate = (cid: string, local: { x: number; y: number }): boolean => {
+    const ctx = regionChordView(cid);
+    if (!ctx) return false;
+    const nx = Math.max(-0.2, Math.min(1.2, local.x / ctx.w));
+    const ny = Math.max(-0.2, Math.min(1.2, local.y / ctx.h));
+    if (!Number.isFinite(nx) || !Number.isFinite(ny)) return false;
+    const lr = liveRef.current!;
+    const r: Region = {
+      id: uid('region'),
+      pts: [{ x: nx, y: ny }, { x: Math.min(1.2, nx + 0.012), y: ny }],
+      color: defaultRegionColor(),
+      borderColor: defaultRegionBorder(),
+      borderWidth: 2,
+    };
+    lr.pushHistory();                          // ONE snapshot per gesture
+    mutateOn(cid, d => { (d.regions ??= []).push(r); return d; });
+    lr.setSel({ kind: 'region', id: r.id });
+    histPausedRef.current = true;              // moves coalesce into that snapshot
+    regionDragRef.current = { cid, id: r.id, mode: 'draw', pt: -1, sx: nx, sy: ny, orig: [] };
+    draggingRef.current = true;
+    return true;
+  };
+
+  /** Press-time dispatch for ALL region gestures on either surface, in grab
+   *  priority order: (1) control point of the SELECTED region → reshape,
+   *  (2) Ctrl+Shift combo or the Region tool on empty space → CREATE a new
+   *  region, (3) a region fill → move it whole. Returns true when the event
+   *  was consumed by a region gesture. */
+  const tryRegionGestureDown = (cid: string, local: { x: number; y: number }, e: { ctrlKey: boolean; metaKey: boolean; shiftKey: boolean }): boolean => {
+    const lr = liveRef.current;
+    if (!lr) return false;
+    const ctx = regionChordView(cid);
+    if (!ctx) return false;
+    const rad = 9;                              // control-point grab radius (px)
+    // 1) Grab a handle of the currently selected region first — reshaping
+    //    must win over creating/moving even under Ctrl+Shift.
+    if (sel && sel.kind === 'region') {
+      const hit = ctx.doc.regions?.find(x => x.id === sel.id)
+        ? { id: sel.id, pt: regionPtAt(ctx.doc.regions!.find(x => x.id === sel.id)!, local.x, local.y, ctx.w, ctx.h, rad) }
+        : null;
+      if (hit && hit.pt >= 0) return beginRegionDrag(cid, hit, local, 'pt');
+    }
+    const wantsCreate = (e.ctrlKey || e.metaKey) && e.shiftKey;
+    if (wantsCreate || tool === 'region') {
+      // 2) Creation gesture. With the bare Region tool, clicking ON an
+      //    existing region's control point still reshapes instead.
+      if (!(wantsCreate && !(tool === 'region'))) {
+        const near = lr.pickRegionAt(ctx.doc, local.x, local.y, ctx.w, ctx.h);
+        if (near && near.pt >= 0) return beginRegionDrag(cid, near, local, 'pt');
+      }
+      return startRegionCreate(cid, local);
+    }
+    // 3) Plain press on a region fill → move the whole lasso (dots/text were
+    //    already given grab priority by the callers before reaching here).
+    const rg = lr.pickRegionAt(ctx.doc, local.x, local.y, ctx.w, ctx.h);
+    if (rg) return beginRegionDrag(cid, { id: rg.id, pt: -1 }, local, 'move');
+    return false;
+  };
+
+  /** Mouseup-side finisher shared by both surfaces: returns true when a live
+   *  region gesture existed and has now been finalized. */
+  const finishRegionGestureUp = (): boolean => {
+    const rd = regionDragRef.current;
+    if (!rd) return false;
+    endRegionDrag(rd.cid);
+    return true;
+  };
+
+  /** Delete whichever item type the current selection describes — regions
+   *  carry their own list, so deleteItemAt alone cannot remove them. */
+  const deleteSelectedAny = (): boolean => {
+    if (!sel || !selectedId) return false;
+    const lr = liveRef.current;
+    if (sel.kind === 'region') {
+      mutateOn(selectedId, d => { d.regions = (d.regions ?? []).filter(r => r.id !== sel.id); return d; });
+      lr?.setSel(null);
+      lr?.flash('Region deleted (Ctrl+Z to undo)');
+      return true;
+    }
+    if (sel.kind === 'fing') {
+      mutateOn(selectedId, d => { d.fingerings = d.fingerings.filter(f => f.id !== sel.id); return d; });
+      lr?.setSel(null);
+      return true;
+    }
+    return lr ? lr.deleteItemAt(selectedId, sel) : false;
+  };
+
+  /** Close the edit dialog for the current selection (regions have no dialog
+   *  — they are styled through the on-canvas handles and toolbar colors). */
+  const openEditForSel = () => {
+    if (!sel || sel.kind === 'region') return;
+    liveRef.current?.setEditing({ ...sel });
   };
 
   // Render EVERY page once (chord thumbnails included) — used for the on-screen
@@ -1377,6 +1508,12 @@ export default function App() {
   // ---------- click on the selected chord board (external editor) ----------
   const onBoardClick = (e: React.MouseEvent) => {
     if (!entry || draggingRef.current || pageDrag || regionDragRef.current) return;
+    // Ctrl+Shift+click is the REGION CREATION gesture — handled on mousedown.
+    // Swallow the follow-up click so it can never fall through to "add text"
+    // or toggle a dot at the same spot.
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey) { lastClickRef.current = null; return; }
+    // Region tool: plain clicks are draw/reshape/move gestures too.
+    if (tool === 'region') { lastClickRef.current = null; return; }
     e.stopPropagation();
     const local = toEditorBoardCoords(e.clientX, e.clientY);
     if (!local) return;                       // board not measurable — never act on (0,0)
@@ -1626,6 +1763,24 @@ export default function App() {
 
   const onBoardPointerDown = (e: React.MouseEvent) => {
     if (!entry || draggingRef.current) return;
+    // CTRL+SHIFT (+Cmd) + press → START A REGION at the cursor. Checked FIRST
+    // so it wins over the plain Ctrl+press delete gesture below. The combo
+    // works with ANY tool and from BOTH surfaces (this editor board and the
+    // page canvas). It places the first lasso point and enters live draw
+    // mode: keep dragging to trace the outline, or release to get a round
+    // starter blob that can be reshaped via its control handles.
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && selectedId) {
+      const local = toEditorBoardCoords(e.clientX, e.clientY);
+      if (local && tryRegionGestureDown(selectedId, local, e)) { e.preventDefault(); e.stopPropagation(); lastClickRef.current = null; }
+      return;
+    }
+    // Region tool active: a plain press draws/moves/reshapes regions instead
+    // of grabbing dots/text for item drags.
+    if (tool === 'region' && selectedId) {
+      const local = toEditorBoardCoords(e.clientX, e.clientY);
+      if (local && tryRegionGestureDown(selectedId, local, e)) { e.preventDefault(); e.stopPropagation(); lastClickRef.current = null; }
+      return;
+    }
     // Ctrl/Cmd + press on an item → DELETE it immediately (the requested
     // delete gesture). Handled here, on mousedown, because the browser fires
     // contextmenu/text-selection quirks around ctrl+click and the plain
@@ -1647,7 +1802,16 @@ export default function App() {
     beginTextDrag(selectedId!, toEditorBoardCoords(e.clientX, e.clientY), { x: e.clientX, y: e.clientY });
   };
   const onBoardPointerMove = (e: React.MouseEvent) => {
-    if (!draggingRef.current || !dragRef.current) return;
+    if (!draggingRef.current) return;
+    // LIVE REGION GESTURE: reshape/move/draw, measured in the EDITOR's own
+    // coordinate system (this handler only receives events over that SVG).
+    if (regionDragRef.current) {
+      const rd = regionDragRef.current;
+      const local = toEditorBoardCoords(e.clientX, e.clientY, rd.cid);
+      if (local) applyRegionDrag(rd.cid, local);
+      return;
+    }
+    if (!dragRef.current) return;
     // PIN to the chord the gesture started on, and recognise WHERE the pointer
     // physically is: this handler only receives events over the EXTERNAL
     // editor board, so measure against that SVG — never re-resolve through
@@ -1659,6 +1823,7 @@ export default function App() {
     applyItemDrag(local, { x: e.clientX, y: e.clientY });
   };
   const onBoardPointerUp = () => {
+    if (finishRegionGestureUp()) return;
     endItemDrag();
   };
 
@@ -1668,6 +1833,7 @@ export default function App() {
   // "delete" an item. Listen globally and finish/abort any live gesture.
   useEffect(() => {
     const up = () => {
+      if (finishRegionGestureUp()) return;   // region gestures finalize properly (blob close etc.)
       if (draggingRef.current) cancelItemDrag();
       if (pageDragRef.current) { pageDragRef.current = null; setPageDrag(false); endDragHistory(); }
     };
@@ -1864,6 +2030,23 @@ export default function App() {
   const onChordBoxDown = (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
     if (e.button !== 0) return;               // left button only
+    // CTRL+SHIFT (+Cmd) + press → START A REGION at the cursor, on EITHER
+    // surface. Checked FIRST so it wins over plain Ctrl+press deletes and the
+    // whole-box move gesture. Coordinates come from the chord's own live
+    // screen CTM, so the first lasso point lands exactly under the cursor.
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey) {
+      selectChord(id);
+      const local = toChordLocalById(id, e.clientX, e.clientY);
+      if (local && tryRegionGestureDown(id, local, e)) { e.preventDefault(); lastClickRef.current = null; }
+      return;
+    }
+    // Region tool active: presses on this chord draw/move/reshape regions.
+    if (tool === 'region') {
+      selectChord(id);
+      const local = toChordLocalById(id, e.clientX, e.clientY);
+      if (local && tryRegionGestureDown(id, local, e)) { e.preventDefault(); lastClickRef.current = null; }
+      return;
+    }
     // SHIFT + press inside a chord → "move mode": grab the DOT/TEXT under the
     // cursor and drag it, even when INLINE EDIT is OFF. Coordinates come from
     // the chord's own live screen CTM, so the grab point is exact regardless
@@ -1910,6 +2093,24 @@ export default function App() {
     setPageDrag(true);
   };
   const onChordBoxMove = (e: React.MouseEvent) => {
+    // LIVE REGION GESTURE started on this page canvas: reshape/move/draw the
+    // lasso. The pointer may physically be over EITHER surface mid-drag, so
+    // measure it against the editor board when inside its rect and against
+    // the chord's page placement otherwise — same dual-surface rule as item
+    // drags, but pinned to the region gesture's own chord (rd.cid).
+    if (draggingRef.current && regionDragRef.current) {
+      const rd = regionDragRef.current;
+      let local: { x: number; y: number } | null = null;
+      const wrapRect = boardWrapRef.current?.getBoundingClientRect();
+      if (wrapRect && wrapRect.width > 0
+        && e.clientX >= wrapRect.left && e.clientX <= wrapRect.right
+        && e.clientY >= wrapRect.top && e.clientY <= wrapRect.bottom) {
+        local = toEditorBoardCoords(e.clientX, e.clientY, rd.cid);
+      }
+      if (!local) local = toChordLocalById(rd.cid, e.clientX, e.clientY);
+      if (local) applyRegionDrag(rd.cid, local);
+      return;
+    }
     // inline-edit: dragging a DOT or TEXT BOX inside a chord moves the item, not the box
     if (draggingRef.current && dragRef.current) {
       // PIN the gesture to the chord it STARTED on. Re-resolving the chord
@@ -2009,6 +2210,7 @@ export default function App() {
     });
   };
   const onChordBoxUp = () => {
+    if (finishRegionGestureUp()) return;      // finished a region draw/reshape/move gesture
     if (endItemDrag()) return;                 // finished an inline item drag
     const ref = pageDragRef.current;
     if (pageDrag && ref && page) {
@@ -2061,6 +2263,7 @@ export default function App() {
   // window-level mouseup.
   useEffect(() => {
     const up = () => {
+      if (finishRegionGestureUp()) return;   // finalize live region gestures on ANY mouseup
       endItemDrag();
       cancelItemDrag();
     };
